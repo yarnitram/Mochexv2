@@ -1,20 +1,26 @@
 import {
   CandlestickBar,
+  DepthLevel,
+  MexcDepthData,
+  MexcDepthWsPayload,
   MexcKlineWsPayload,
   MexcMiniTickerItem,
   MexcMiniTickerWsPayload,
+  parseDepthLevels,
   parseWsKline,
   WS_INTERVAL_MAP,
 } from "./types";
 
 export type KlineCallback = (bar: CandlestickBar) => void;
 export type MiniTickerCallback = (tickers: MexcMiniTickerItem[]) => void;
+export type DepthCallback = (depth: MexcDepthData) => void;
 
 export class MexcWebSocketManager {
   private ws: WebSocket | null = null;
   private wsUrl: string;
   private klineSubscriptions: Map<string, Set<KlineCallback>> = new Map();
   private miniTickerSubscriptions: Set<MiniTickerCallback> = new Set();
+  private depthSubscriptions: Map<string, Set<DepthCallback>> = new Map();
   private pingInterval: NodeJS.Timeout | null = null;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private isExplicitlyClosed = false;
@@ -110,6 +116,32 @@ export class MexcWebSocketManager {
     }
   }
 
+  public subscribeDepth(symbol: string, callback: DepthCallback): string {
+    const channel = `spot@public.limit.depth.v3.api@${symbol.toUpperCase()}@5`;
+    if (!this.depthSubscriptions.has(channel)) {
+      this.depthSubscriptions.set(channel, new Set());
+      this.sendSubscription(channel);
+    }
+    this.depthSubscriptions.get(channel)!.add(callback);
+    return channel;
+  }
+
+  public unsubscribeDepth(channel: string, callback?: DepthCallback): void {
+    const listeners = this.depthSubscriptions.get(channel);
+    if (!listeners) return;
+
+    if (callback) {
+      listeners.delete(callback);
+    } else {
+      listeners.clear();
+    }
+
+    if (listeners.size === 0) {
+      this.depthSubscriptions.delete(channel);
+      this.sendUnsubscription(channel);
+    }
+  }
+
   private handleMessage(raw: string): void {
     if (raw === "pong" || raw === "PONG") return;
 
@@ -131,6 +163,24 @@ export class MexcWebSocketManager {
       if (data?.c && data.c.includes("public.miniTickers.v3.api") && Array.isArray(data?.d)) {
         const payload = data as MexcMiniTickerWsPayload;
         this.miniTickerSubscriptions.forEach((fn) => fn(payload.d));
+      }
+
+      // Handle Limit Depth Stream
+      if (data?.c && data.c.includes("public.limit.depth.v3.api") && data?.d) {
+        const payload = data as MexcDepthWsPayload;
+        const channel = payload.c;
+        const listeners = this.depthSubscriptions.get(channel);
+        if (listeners && listeners.size > 0) {
+          const asks = parseDepthLevels(payload.d.asks);
+          const bids = parseDepthLevels(payload.d.bids);
+          const depthData: MexcDepthData = {
+            symbol: payload.s || channel.split("@")[2] || "",
+            asks,
+            bids,
+            timestamp: payload.t || Date.now(),
+          };
+          listeners.forEach((fn) => fn(depthData));
+        }
       }
     } catch (_err) {
       // Ignore unparseable frames
@@ -161,6 +211,9 @@ export class MexcWebSocketManager {
 
   private resubscribeAll(): void {
     for (const channel of this.klineSubscriptions.keys()) {
+      this.sendSubscription(channel);
+    }
+    for (const channel of this.depthSubscriptions.keys()) {
       this.sendSubscription(channel);
     }
     if (this.miniTickerSubscriptions.size > 0) {

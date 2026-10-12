@@ -1,38 +1,101 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { TacticalHeader } from "@/components/terminal/TacticalHeader";
+import { DrawingRail, DrawingToolType } from "@/components/terminal/DrawingRail";
+import { RightSidebar } from "@/components/terminal/RightSidebar";
+import { ScriptStudio } from "@/components/terminal/ScriptStudio";
+import { IndicatorsModal } from "@/components/terminal/IndicatorsModal";
+import { ReplaySimulationPill } from "@/components/terminal/ReplaySimulationPill";
 import { TradingViewContainer } from "@/components/chart/TradingViewContainer";
-import { WatchlistDrawer } from "@/components/watchlist/WatchlistDrawer";
-import { ReplayToolbar } from "@/components/chart/ReplayToolbar";
-import { IndicatorEditorModal } from "@/components/editor/IndicatorEditorModal";
+import { MobileTacticalDrawer } from "@/components/mobile/MobileTacticalDrawer";
+import { MobileBottomNav } from "@/components/mobile/MobileBottomNav";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { CandlestickBar } from "@/lib/mexc/types";
-import {
-  RotateCcw,
-  Code2,
-  ListFilter,
-  TrendingUp,
-  SlidersHorizontal,
-  ChevronDown,
-} from "lucide-react";
-
-const TIMEFRAMES = [
-  { label: "1m", value: "1" },
-  { label: "5m", value: "5" },
-  { label: "15m", value: "15" },
-  { label: "30m", value: "30" },
-  { label: "1h", value: "60" },
-  { label: "4h", value: "240" },
-  { label: "1D", value: "1D" },
-];
 
 export default function WorkstationPage() {
+  // Workspace state with localStorage persistence
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [resolution, setResolution] = useState("15");
-  const [isWatchlistOpen, setIsWatchlistOpen] = useState(true);
-  const [isIndicatorModalOpen, setIsIndicatorModalOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isStudioOpen, setIsStudioOpen] = useState(false);
+  const [isIndicatorsModalOpen, setIsIndicatorsModalOpen] = useState(false);
   const [isReplayActive, setIsReplayActive] = useState(false);
+
+  // Active tools & indicators
+  const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("crosshair");
+  const [activeIndicators, setActiveIndicators] = useState<string[]>([
+    "EMA Ribbon Momentum Multi-Timeframe",
+  ]);
+
+  // Market metrics tape
+  const [marketStats, setMarketStats] = useState({
+    price: 68420.5,
+    change: 3.42,
+    high: 69120.0,
+    low: 67200.0,
+    volume: 42819.5,
+  });
+
+  // Cached bars for replay and indicator sandbox
   const [cachedBars, setCachedBars] = useState<CandlestickBar[]>([]);
+
+  // Mobile navigation state
+  const [mobileScreen, setMobileScreen] = useState<"chart" | "watchlist" | "depth" | "draw" | "studio">("chart");
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+
+  // Load preferences from localStorage on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const savedSymbol = localStorage.getItem("mochex:symbol");
+      const savedRes = localStorage.getItem("mochex:resolution");
+      const savedSidebar = localStorage.getItem("mochex:sidebar_open");
+      const savedStudio = localStorage.getItem("mochex:studio_open");
+
+      if (savedSymbol) setSymbol(savedSymbol);
+      if (savedRes) setResolution(savedRes);
+      if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
+      if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, []);
+
+  // Save changes to localStorage
+  const handleSelectSymbol = (sym: string) => {
+    setSymbol(sym);
+    try {
+      localStorage.setItem("mochex:symbol", sym);
+    } catch {}
+  };
+
+  const handleSelectResolution = (res: string) => {
+    setResolution(res);
+    try {
+      localStorage.setItem("mochex:resolution", res);
+    } catch {}
+  };
+
+  const handleToggleSidebar = () => {
+    setIsSidebarOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("mochex:sidebar_open", String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleToggleStudio = () => {
+    setIsStudioOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("mochex:studio_open", String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   const handleToggleReplay = () => {
     if (isReplayActive) {
@@ -40,7 +103,6 @@ export default function WorkstationPage() {
       setIsReplayActive(false);
     } else {
       replayEngine.startSelecting();
-      // Default to 50 bars ago for instant test replay
       if (cachedBars.length > 50) {
         const cutoff = cachedBars[cachedBars.length - 30].time;
         replayEngine.setCutoffTime(cutoff);
@@ -49,118 +111,132 @@ export default function WorkstationPage() {
     }
   };
 
+  const handleApplyIndicator = (name: string) => {
+    setActiveIndicators((prev) =>
+      prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]
+    );
+  };
+
+  const handleClearDrawings = () => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("mochex:clear-drawings"));
+    }
+  };
+
+  // Handle Mobile Bottom Nav Clicks
+  const handleSelectMobileScreen = (screen: "chart" | "watchlist" | "depth" | "draw" | "studio") => {
+    setMobileScreen(screen);
+    if (screen === "watchlist" || screen === "draw") {
+      setIsMobileDrawerOpen(true);
+    } else if (screen === "studio") {
+      setIsStudioOpen(true);
+      setIsMobileDrawerOpen(false);
+    } else {
+      setIsMobileDrawerOpen(false);
+    }
+  };
+
   return (
-    <main className="h-screen w-screen flex flex-col bg-background select-none">
-      {/* Workstation Top Navigation Bar */}
-      <header className="h-12 bg-surface border-b border-border px-4 flex items-center justify-between z-30">
-        {/* Brand & Market Selector */}
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-gradient-to-tr from-accent to-blue-400 flex items-center justify-center font-black text-xs text-white shadow-md shadow-accent/20">
-              M
-            </div>
-            <span className="font-black text-sm tracking-wider bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent font-sans">
-              MOCHEX
-            </span>
-            <span className="text-[10px] text-muted font-mono uppercase px-1.5 py-0.5 bg-surface-card rounded border border-border">
-              MEXC SPOT
-            </span>
-          </div>
+    <main className="h-screen w-screen flex flex-col bg-background select-none overflow-hidden font-sans">
+      {/* 1. Desktop Tactical Header */}
+      <TacticalHeader
+        symbol={symbol}
+        onSelectSymbol={handleSelectSymbol}
+        resolution={resolution}
+        onSelectResolution={handleSelectResolution}
+        markPrice={marketStats.price}
+        change24h={marketStats.change}
+        high24h={marketStats.high}
+        low24h={marketStats.low}
+        volume24h={marketStats.volume}
+        isReplayActive={isReplayActive}
+        onToggleReplay={handleToggleReplay}
+        onOpenIndicators={() => setIsIndicatorsModalOpen(true)}
+        activeIndicatorsCount={activeIndicators.length}
+        isSidebarOpen={isSidebarOpen}
+        onToggleSidebar={handleToggleSidebar}
+        isStudioOpen={isStudioOpen}
+        onToggleStudio={handleToggleStudio}
+      />
 
-          <div className="h-4 w-px bg-border" />
-
-          {/* Timeframe Selectors */}
-          <div className="flex items-center gap-1">
-            {TIMEFRAMES.map((tf) => (
-              <button
-                key={tf.value}
-                onClick={() => setResolution(tf.value)}
-                className={`px-2 py-1 rounded text-xs font-mono font-medium transition-colors ${
-                  resolution === tf.value
-                    ? "bg-accent text-white"
-                    : "text-muted hover:text-foreground hover:bg-surface-card"
-                }`}
-              >
-                {tf.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Feature Actions */}
-        <div className="flex items-center gap-2">
-          {/* Bar Replay Trigger */}
-          <button
-            onClick={handleToggleReplay}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold font-mono border transition-all ${
-              isReplayActive
-                ? "bg-accent/20 text-accent border-accent"
-                : "bg-surface-card hover:bg-surface-hover text-muted hover:text-foreground border-border"
-            }`}
-          >
-            <RotateCcw size={13} className={isReplayActive ? "animate-spin" : ""} />
-            <span>{isReplayActive ? "Replay Active" : "Bar Replay"}</span>
-          </button>
-
-          {/* Indicator Script Lab Modal */}
-          <button
-            onClick={() => setIsIndicatorModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-surface-card hover:bg-surface-hover text-muted hover:text-foreground border border-border transition-colors"
-          >
-            <Code2 size={13} className="text-accent" />
-            <span>Indicators</span>
-          </button>
-
-          <div className="h-4 w-px bg-border mx-1" />
-
-          {/* Watchlist Toggle */}
-          <button
-            onClick={() => setIsWatchlistOpen((prev) => !prev)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
-              isWatchlistOpen
-                ? "bg-surface-hover text-foreground border-border"
-                : "bg-surface-card text-muted hover:text-foreground border-border"
-            }`}
-          >
-            <ListFilter size={13} />
-            <span>Watchlist</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Chart Workspace Area */}
-      <div className="flex-1 relative overflow-hidden flex">
-        {/* TradingView Chart Container */}
-        <div className="flex-1 h-full relative">
-          <TradingViewContainer
-            symbol={symbol}
-            resolution={resolution}
-            onBarsLoaded={setCachedBars}
+      {/* 2. Main Terminal Workspace Body */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Left Drawing Rail (Desktop) */}
+        <div className="hidden md:flex shrink-0">
+          <DrawingRail
+            activeTool={activeDrawingTool}
+            onSelectTool={setActiveDrawingTool}
+            onClearAll={handleClearDrawings}
           />
-
-          {/* Floating Replay Controls */}
-          {isReplayActive && (
-            <ReplayToolbar onClose={() => setIsReplayActive(false)} />
-          )}
         </div>
 
-        {/* Watchlist Drawer */}
-        <WatchlistDrawer
-          isOpen={isWatchlistOpen}
-          onClose={() => setIsWatchlistOpen(false)}
-          selectedSymbol={symbol}
-          onSelectSymbol={setSymbol}
-        />
+        {/* Center Workspace (Chart Canvas + Replay Simulation Pill) */}
+        <div className="flex-1 flex flex-col relative overflow-hidden">
+          <div className="flex-1 relative w-full h-full">
+            <TradingViewContainer
+              symbol={symbol}
+              resolution={resolution}
+              activeDrawingTool={activeDrawingTool}
+              activeIndicators={activeIndicators}
+              onBarsLoaded={setCachedBars}
+              onPriceUpdate={(stats) => setMarketStats(stats)}
+            />
+
+            {/* In-chart Floating Simulation Control Pill */}
+            {isReplayActive && (
+              <ReplaySimulationPill onClose={() => setIsReplayActive(false)} />
+            )}
+          </div>
+
+          {/* Bottom Script Studio (Collapsible Split Panel) */}
+          <ScriptStudio
+            isOpen={isStudioOpen}
+            onClose={() => setIsStudioOpen(false)}
+            sampleBars={cachedBars}
+            onApplyIndicator={(name) => {
+              handleApplyIndicator(name);
+              setIsStudioOpen(false);
+            }}
+          />
+        </div>
+
+        {/* Right High-Density Sidebar (Desktop) */}
+        <div className="hidden md:flex shrink-0">
+          <RightSidebar
+            isOpen={isSidebarOpen}
+            onClose={() => setIsSidebarOpen(false)}
+            selectedSymbol={symbol}
+            onSelectSymbol={handleSelectSymbol}
+            currentPrice={marketStats.price}
+          />
+        </div>
       </div>
 
-      {/* Script Editor Modal */}
-      <IndicatorEditorModal
-        isOpen={isIndicatorModalOpen}
-        onClose={() => setIsIndicatorModalOpen(false)}
-        sampleBars={cachedBars}
-        onApplyIndicator={(name) => {
-          console.log(`Applied indicator: ${name}`);
+      {/* 3. Indicators & Strategies Catalog Modal (fx Trigger) */}
+      <IndicatorsModal
+        isOpen={isIndicatorsModalOpen}
+        onClose={() => setIsIndicatorsModalOpen(false)}
+        onApplyIndicator={handleApplyIndicator}
+        activeIndicators={activeIndicators}
+        onEditInStudio={() => {
+          setIsStudioOpen(true);
         }}
+      />
+
+      {/* 4. Mobile Adaptations (< 768px viewports) */}
+      <MobileTacticalDrawer
+        isOpen={isMobileDrawerOpen}
+        onToggle={() => setIsMobileDrawerOpen(!isMobileDrawerOpen)}
+        selectedSymbol={symbol}
+        onSelectSymbol={handleSelectSymbol}
+        activeDrawingTool={activeDrawingTool}
+        onSelectDrawingTool={setActiveDrawingTool}
+        onClearDrawings={handleClearDrawings}
+      />
+
+      <MobileBottomNav
+        activeScreen={mobileScreen}
+        onSelectScreen={handleSelectMobileScreen}
       />
     </main>
   );

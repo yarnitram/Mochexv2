@@ -96,6 +96,51 @@ export interface MexcMiniTickerWsPayload {
   t: number;
 }
 
+export interface DepthLevel {
+  price: number;
+  amount: number;
+  total?: number;
+}
+
+export interface MexcDepthData {
+  symbol: string;
+  asks: DepthLevel[];
+  bids: DepthLevel[];
+  timestamp: number;
+}
+
+export interface MexcDepthWsPayload {
+  c: string; // e.g. spot@public.limit.depth.v3.api@BTCUSDT@5
+  d: {
+    asks?: Array<{ p: string; v: string } | [string, string]>;
+    bids?: Array<{ p: string; v: string } | [string, string]>;
+  };
+  s?: string;
+  t?: number;
+}
+
+export function parseDepthLevels(rawLevels?: Array<{ p: string; v: string } | [string, string]>): DepthLevel[] {
+  if (!rawLevels || !Array.isArray(rawLevels)) return [];
+  let runningTotal = 0;
+  return rawLevels.map((item) => {
+    let p = 0;
+    let v = 0;
+    if (Array.isArray(item)) {
+      p = parseFloat(item[0]);
+      v = parseFloat(item[1]);
+    } else if (item && typeof item === "object") {
+      p = parseFloat(item.p);
+      v = parseFloat(item.v);
+    }
+    runningTotal += isNaN(v) ? 0 : v;
+    return {
+      price: isNaN(p) ? 0 : p,
+      amount: isNaN(v) ? 0 : v,
+      total: runningTotal,
+    };
+  });
+}
+
 export function parseRawKline(raw: MexcRawKline): CandlestickBar {
   return {
     time: Number(raw[0]),
@@ -117,3 +162,4 @@ export function parseWsKline(data: MexcKlineWsPayload["d"]["k"]): CandlestickBar
     volume: parseFloat(data.v),
   };
 }
+
