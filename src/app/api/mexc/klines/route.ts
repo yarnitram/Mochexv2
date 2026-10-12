@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const endTime = searchParams.get("endTime");
   const limit = searchParams.get("limit") || "500";
 
-  const mexcBase = process.env.NEXT_PUBLIC_MEXC_API_BASE || "https://api.mexc.com";
+  const mexcBase = process.env.NEXT_PUBLIC_MEXC_API_BASE || "https://api.mexc.co";
   const params = new URLSearchParams({
     symbol: symbol.toUpperCase(),
     interval,

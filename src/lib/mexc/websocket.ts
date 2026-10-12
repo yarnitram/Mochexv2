@@ -19,7 +19,7 @@ export class MexcWebSocketManager {
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private isExplicitlyClosed = false;
 
-  constructor(wsUrl = process.env.NEXT_PUBLIC_MEXC_WS_BASE || "wss://wbs.mexc.com/ws") {
+  constructor(wsUrl = process.env.NEXT_PUBLIC_MEXC_WS_BASE || "wss://wbs.mexc.co/ws") {
     this.wsUrl = wsUrl;
   }
 

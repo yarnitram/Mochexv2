@@ -14,7 +14,7 @@ export class MexcClient {
   private proxyBase: string;
 
   constructor(
-    apiBase = process.env.NEXT_PUBLIC_MEXC_API_BASE || "https://api.mexc.com",
+    apiBase = process.env.NEXT_PUBLIC_MEXC_API_BASE || "https://api.mexc.co",
     proxyBase = "/api/mexc"
   ) {
     this.apiBase = apiBase;

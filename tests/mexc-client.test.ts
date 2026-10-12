@@ -3,7 +3,7 @@ import { MexcClient } from "@/lib/mexc/client";
 import { MexcRawKline, parseRawKline } from "@/lib/mexc/types";
 
 describe("MexcClient & Data Transformations", () => {
-  const client = new MexcClient("https://api.mexc.com", "/api/mexc");
+  const client = new MexcClient("https://api.mexc.co", "/api/mexc");
 
   it("should correctly map TradingView resolutions to MEXC intervals", () => {
     expect(client.toMexcInterval("1")).toBe("1m");
