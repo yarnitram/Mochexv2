@@ -12,6 +12,7 @@ import { MobileTacticalDrawer } from "@/components/mobile/MobileTacticalDrawer";
 import { MobileBottomNav } from "@/components/mobile/MobileBottomNav";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { CandlestickBar } from "@/lib/mexc/types";
+import { BacktestPerformance } from "@/lib/strategy/types";
 
 export default function WorkstationPage() {
   // Workspace state with localStorage persistence
@@ -21,6 +22,7 @@ export default function WorkstationPage() {
   const [isStudioOpen, setIsStudioOpen] = useState(false);
   const [isIndicatorsModalOpen, setIsIndicatorsModalOpen] = useState(false);
   const [isReplayActive, setIsReplayActive] = useState(false);
+  const [strategyResult, setStrategyResult] = useState<BacktestPerformance | null>(null);
 
   // Active tools & indicators
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("crosshair");
@@ -178,6 +180,7 @@ export default function WorkstationPage() {
               resolution={resolution}
               activeDrawingTool={activeDrawingTool}
               activeIndicators={activeIndicators}
+              trades={strategyResult?.trades || []}
               onBarsLoaded={setCachedBars}
               onPriceUpdate={(stats) => setMarketStats(stats)}
             />
@@ -193,6 +196,7 @@ export default function WorkstationPage() {
             isOpen={isStudioOpen}
             onClose={() => setIsStudioOpen(false)}
             sampleBars={cachedBars}
+            onStrategyResult={setStrategyResult}
             onApplyIndicator={(name) => {
               handleApplyIndicator(name);
               setIsStudioOpen(false);

@@ -10,12 +10,14 @@ import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
 import { Activity, ShieldCheck, Layers, Eye, Settings, X } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
+import { BacktestTrade } from "@/lib/strategy/types";
 
 interface TradingViewContainerProps {
   symbol: string;
   resolution: string;
   activeDrawingTool?: DrawingToolType;
   activeIndicators?: string[];
+  trades?: BacktestTrade[];
   onBarsLoaded?: (bars: CandlestickBar[]) => void;
   onPriceUpdate?: (stats: {
     price: number;
@@ -47,6 +49,7 @@ export function TradingViewContainer({
   resolution,
   activeDrawingTool = "none",
   activeIndicators = ["EMA Ribbon Momentum Multi-Timeframe"],
+  trades = [],
   onBarsLoaded,
   onPriceUpdate,
 }: TradingViewContainerProps) {
@@ -329,7 +332,60 @@ export function TradingViewContainer({
       ctx.setLineDash([]);
     }
 
-    // 4.5 Interactive Crosshair
+    // 4.5 Render Backtest Strategy Trade Markers
+    trades.forEach((trade) => {
+      const entryIdx = trade.entryBarIndex;
+      const exitIdx = trade.exitBarIndex;
+
+      if (entryIdx >= 0 && entryIdx < bars.length) {
+        const entryX = entryIdx * barSpacing + barSpacing / 2;
+        const entryY = 20 + mainChartHeight * (1 - (trade.entryPrice - minPrice) / priceRange);
+        const isLong = trade.direction === "long";
+
+        // Entry Marker Triangle
+        ctx.fillStyle = isLong ? "#00c087" : "#ff3b30";
+        ctx.beginPath();
+        if (isLong) {
+          ctx.moveTo(entryX, entryY + 12);
+          ctx.lineTo(entryX - 4, entryY + 19);
+          ctx.lineTo(entryX + 4, entryY + 19);
+        } else {
+          ctx.moveTo(entryX, entryY - 12);
+          ctx.lineTo(entryX - 4, entryY - 19);
+          ctx.lineTo(entryX + 4, entryY - 19);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        // Connected Trade Path to Exit
+        if (exitIdx >= 0 && exitIdx < bars.length) {
+          const exitX = exitIdx * barSpacing + barSpacing / 2;
+          const exitY = 20 + mainChartHeight * (1 - (trade.exitPrice - minPrice) / priceRange);
+          const isProfitable = trade.netPnL >= 0;
+
+          ctx.strokeStyle = isProfitable ? "rgba(0, 192, 135, 0.45)" : "rgba(255, 59, 48, 0.45)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 3]);
+          ctx.beginPath();
+          ctx.moveTo(entryX, entryY);
+          ctx.lineTo(exitX, exitY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Exit 'X' Marker
+          ctx.strokeStyle = isProfitable ? "#00c087" : "#ff3b30";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(exitX - 3, exitY - 3);
+          ctx.lineTo(exitX + 3, exitY + 3);
+          ctx.moveTo(exitX + 3, exitY - 3);
+          ctx.lineTo(exitX - 3, exitY + 3);
+          ctx.stroke();
+        }
+      }
+    });
+
+    // 4.6 Interactive Crosshair
     if (mousePos && mousePos.x < chartWidth && mousePos.y < height) {
       ctx.strokeStyle = "rgba(141, 144, 162, 0.4)";
       ctx.lineWidth = 1;
