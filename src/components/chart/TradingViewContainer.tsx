@@ -177,14 +177,6 @@ export function TradingViewContainer({
 
     chartRef.current = chart;
 
-    // Unified Series Topology: Volume Sub-Pane (Independent Price Scale)
-    chart.priceScale("volume").applyOptions({
-      scaleMargins: {
-        top: 0.8,
-        bottom: 0,
-      },
-    });
-
     // 2.1 Candlestick Series
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: "#00c087",
@@ -197,12 +189,20 @@ export function TradingViewContainer({
     });
     candleSeriesRef.current = candleSeries;
 
-    // 2.2 Volume Histogram Series
+    // 2.2 Volume Histogram Series (Independent Price Scale)
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },
       priceScaleId: "volume",
     });
     volumeSeriesRef.current = volumeSeries;
+
+    // Unified Series Topology: Volume Sub-Pane Scale Margins (margins 80% top / 0% bottom)
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: {
+        top: 0.8,
+        bottom: 0,
+      },
+    });
 
     // 2.3 Gold EMA 20 & Cyan EMA 50 Overlays
     const ema20Series = chart.addSeries(LineSeries, {
