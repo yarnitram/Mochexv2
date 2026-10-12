@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { TacticalHeader } from "@/components/terminal/TacticalHeader";
 import { DrawingRail, DrawingToolType } from "@/components/terminal/DrawingRail";
 import { RightSidebar } from "@/components/terminal/RightSidebar";
@@ -48,6 +48,17 @@ export default function WorkstationPage() {
 
   // Cached bars for replay and indicator sandbox
   const [cachedBars, setCachedBars] = useState<CandlestickBar[]>([]);
+
+  const handlePriceUpdate = useCallback(
+    (stats: { price: number; change: number; high: number; low: number; volume: number }) => {
+      setMarketStats(stats);
+    },
+    []
+  );
+
+  const handleBarsLoaded = useCallback((bars: CandlestickBar[]) => {
+    setCachedBars(bars);
+  }, []);
 
   // Mobile navigation state
   const [mobileScreen, setMobileScreen] = useState<"chart" | "watchlist" | "depth" | "draw" | "studio">("chart");
@@ -206,8 +217,8 @@ export default function WorkstationPage() {
               activeDrawingTool={activeDrawingTool}
               activeIndicators={activeIndicators}
               trades={strategyResult?.trades || []}
-              onBarsLoaded={setCachedBars}
-              onPriceUpdate={(stats) => setMarketStats(stats)}
+              onBarsLoaded={handleBarsLoaded}
+              onPriceUpdate={handlePriceUpdate}
             />
 
             {/* In-chart Floating Simulation Control Pill */}

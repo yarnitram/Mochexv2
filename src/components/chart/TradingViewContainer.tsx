@@ -104,6 +104,20 @@ export function TradingViewContainer({
   const barsRef = useRef<CandlestickBar[]>([]);
   const isFetchingOlderBars = useRef(false);
   const hasMoreHistory = useRef(true);
+  const isInitialLoadDone = useRef(false);
+  const lastBackfillTime = useRef(0);
+
+  const symbolRef = useRef(symbol);
+  symbolRef.current = symbol;
+
+  const resolutionRef = useRef(resolution);
+  resolutionRef.current = resolution;
+
+  const onBarsLoadedRef = useRef(onBarsLoaded);
+  onBarsLoadedRef.current = onBarsLoaded;
+
+  const onPriceUpdateRef = useRef(onPriceUpdate);
+  onPriceUpdateRef.current = onPriceUpdate;
 
   // Component React states
   const [hasLibrary, setHasLibrary] = useState(false);
@@ -255,16 +269,22 @@ export function TradingViewContainer({
     // 2.6 Infinite Scroll Pagination on Left Boundary Panning (DEC-033)
     const onLogicalRangeChange = async (newRange: LogicalRange | null) => {
       if (!newRange) return;
-      if (newRange.from < 15 && !isFetchingOlderBars.current && hasMoreHistory.current) {
+      const now = Date.now();
+      // Only trigger when initial data load is complete and cooldown has passed
+      if (!isInitialLoadDone.current) return;
+      if (now - lastBackfillTime.current < 2000) return;
+
+      if (newRange.from < 5 && !isFetchingOlderBars.current && hasMoreHistory.current) {
         const currentBars = barsRef.current;
-        if (currentBars.length === 0) return;
+        if (currentBars.length < 50) return;
         const oldestBar = currentBars[0];
 
+        lastBackfillTime.current = now;
         isFetchingOlderBars.current = true;
         try {
           const olderBars = await mexcClient.getKlines({
-            symbol,
-            resolution,
+            symbol: symbolRef.current,
+            resolution: resolutionRef.current,
             limit: 300,
             endTime: oldestBar.time - 1,
           });
@@ -280,7 +300,7 @@ export function TradingViewContainer({
           if (addedCount > 0) {
             barsRef.current = merged;
             setBars(merged);
-            onBarsLoaded?.(merged);
+            onBarsLoadedRef.current?.(merged);
 
             // Re-populate series with merged dataset
             candleSeries.setData(formatCandlestickData(merged));
@@ -330,12 +350,13 @@ export function TradingViewContainer({
       ema50SeriesRef.current = null;
       markersPluginRef.current = null;
     };
-  }, [hasLibrary, symbol, resolution, onBarsLoaded]);
+  }, [hasLibrary]);
 
   // 3. Load historical klines and attach real-time MEXC feed
   useEffect(() => {
     let isCancelled = false;
     hasMoreHistory.current = true;
+    isInitialLoadDone.current = false;
     setIsLoading(true);
 
     const loadData = async () => {
@@ -351,7 +372,7 @@ export function TradingViewContainer({
           barsRef.current = sorted;
           setBars(sorted);
           replayEngine.loadHistory(sorted as Bar[]);
-          onBarsLoaded?.(sorted);
+          onBarsLoadedRef.current?.(sorted);
 
           // Populate Lightweight Charts series
           if (
@@ -365,6 +386,9 @@ export function TradingViewContainer({
             ema20SeriesRef.current.setData(buildEmaLineData(sorted, 20));
             ema50SeriesRef.current.setData(buildEmaLineData(sorted, 50));
             chartRef.current?.timeScale().scrollToRealTime();
+            setTimeout(() => {
+              isInitialLoadDone.current = true;
+            }, 1000);
           }
 
           if (sorted.length > 0) {
@@ -379,7 +403,7 @@ export function TradingViewContainer({
             const volume = sorted.reduce((acc, b) => acc + b.volume, 0);
 
             setCurrentPrice(lastBar.close);
-            onPriceUpdate?.({
+            onPriceUpdateRef.current?.({
               price: lastBar.close,
               change,
               high,
@@ -486,7 +510,7 @@ export function TradingViewContainer({
       mexcWsManager.unsubscribeKline(channel);
       unsubscribeReplay();
     };
-  }, [symbol, resolution, onBarsLoaded, onPriceUpdate]);
+  }, [symbol, resolution]);
 
   // 4. Trade Markers Synchronization (DEC-032)
   useEffect(() => {
