@@ -6,6 +6,9 @@ import {
   buildEmaLineData,
   buildTradeMarkers,
   mergeAndDeduplicateBars,
+  buildBollingerBandsData,
+  buildRsiData,
+  buildMacdData,
 } from "@/lib/chart/lightweight-adapter";
 import { CandlestickBar } from "@/lib/mexc/types";
 import { BacktestTrade } from "@/lib/strategy/types";
@@ -157,4 +160,64 @@ describe("Lightweight Charts Adapter Utilities", () => {
     expect(merged.length).toBe(4);
     expect(merged.map((b) => b.time)).toEqual([1000, 2000, 3000, 4000]);
   });
+
+  it("should calculate Bollinger Bands series with correct offset alignment", () => {
+    const bars: CandlestickBar[] = Array.from({ length: 30 }, (_, i) => ({
+      time: 1672531200000 + i * 60000,
+      open: 100 + i,
+      high: 105 + i,
+      low: 95 + i,
+      close: 102 + i,
+      volume: 1000,
+    }));
+
+    const bb = buildBollingerBandsData(bars, 20, 2);
+    // 30 bars with period 20 -> 30 - 20 + 1 = 11 data points
+    expect(bb.upper.length).toBe(11);
+    expect(bb.middle.length).toBe(11);
+    expect(bb.lower.length).toBe(11);
+
+    // First point aligns with bar index 19 (20th bar)
+    expect(bb.upper[0].time).toBe(toUtcTimestamp(bars[19].time));
+    expect(bb.upper[0].value).toBeGreaterThan(bb.middle[0].value);
+    expect(bb.middle[0].value).toBeGreaterThan(bb.lower[0].value);
+  });
+
+  it("should calculate RSI series with correct offset alignment", () => {
+    const bars: CandlestickBar[] = Array.from({ length: 30 }, (_, i) => ({
+      time: 1672531200000 + i * 60000,
+      open: 100 + i,
+      high: 105 + i,
+      low: 95 + i,
+      close: 102 + i,
+      volume: 1000,
+    }));
+
+    const rsi = buildRsiData(bars, 14);
+    // 30 bars with period 14 -> 30 - 14 = 16 data points
+    expect(rsi.length).toBe(16);
+    expect(rsi[0].time).toBe(toUtcTimestamp(bars[14].time));
+    expect(rsi[0].value).toBeGreaterThanOrEqual(0);
+    expect(rsi[0].value).toBeLessThanOrEqual(100);
+  });
+
+  it("should calculate MACD line, signal line, and histogram series", () => {
+    const bars: CandlestickBar[] = Array.from({ length: 40 }, (_, i) => ({
+      time: 1672531200000 + i * 60000,
+      open: 100 + i,
+      high: 105 + i,
+      low: 95 + i,
+      close: 102 + i,
+      volume: 1000,
+    }));
+
+    const macd = buildMacdData(bars, 12, 26, 9);
+    // 40 bars with slow 26 and signal 9 -> 40 - (25 + 8) = 7 complete points
+    expect(macd.macd.length).toBe(7);
+    expect(macd.signal.length).toBe(7);
+    expect(macd.histogram.length).toBe(7);
+    expect(macd.macd[0].time).toBe(toUtcTimestamp(bars[33].time));
+    expect(macd.histogram[0].color).toBeDefined();
+  });
 });
+

@@ -35,6 +35,7 @@ import {
   buildEmaLineData,
   buildTradeMarkers,
   mergeAndDeduplicateBars,
+  buildBollingerBandsData,
 } from "@/lib/chart/lightweight-adapter";
 
 interface TradingViewContainerProps {
@@ -77,6 +78,9 @@ interface HoveredStats {
   volume?: number;
   ema20?: number;
   ema50?: number;
+  bbUpper?: number;
+  bbMiddle?: number;
+  bbLower?: number;
 }
 
 export function TradingViewContainer({
@@ -98,6 +102,9 @@ export function TradingViewContainer({
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const ema20SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ema50SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbUpperSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbMiddleSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbLowerSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   // Synchronous state refs for callbacks
@@ -235,6 +242,34 @@ export function TradingViewContainer({
     });
     ema50SeriesRef.current = ema50Series;
 
+    // 2.3b Bollinger Bands Overlays
+    const bbUpperSeries = chart.addSeries(LineSeries, {
+      color: "rgba(41, 98, 255, 0.75)",
+      lineWidth: 1,
+      priceScaleId: "right",
+      title: "BB Upper",
+      visible: false,
+    });
+    bbUpperSeriesRef.current = bbUpperSeries;
+
+    const bbMiddleSeries = chart.addSeries(LineSeries, {
+      color: "rgba(245, 172, 55, 0.75)",
+      lineWidth: 1,
+      priceScaleId: "right",
+      title: "BB Basis",
+      visible: false,
+    });
+    bbMiddleSeriesRef.current = bbMiddleSeries;
+
+    const bbLowerSeries = chart.addSeries(LineSeries, {
+      color: "rgba(41, 98, 255, 0.75)",
+      lineWidth: 1,
+      priceScaleId: "right",
+      title: "BB Lower",
+      visible: false,
+    });
+    bbLowerSeriesRef.current = bbLowerSeries;
+
     // 2.4 Trade Markers Plugin (Native Lightweight-Charts Markers)
     const markersPlugin = createSeriesMarkers(candleSeries, []);
     markersPluginRef.current = markersPlugin;
@@ -250,6 +285,9 @@ export function TradingViewContainer({
       const volData = param.seriesData.get(volumeSeries) as HistogramData<Time> | undefined;
       const ema20Data = param.seriesData.get(ema20Series) as LineData<Time> | undefined;
       const ema50Data = param.seriesData.get(ema50Series) as LineData<Time> | undefined;
+      const bbUpperData = param.seriesData.get(bbUpperSeries) as LineData<Time> | undefined;
+      const bbMiddleData = param.seriesData.get(bbMiddleSeries) as LineData<Time> | undefined;
+      const bbLowerData = param.seriesData.get(bbLowerSeries) as LineData<Time> | undefined;
 
       if (candleData && "open" in candleData) {
         setHoveredStats({
@@ -260,6 +298,9 @@ export function TradingViewContainer({
           volume: volData?.value,
           ema20: ema20Data?.value,
           ema50: ema50Data?.value,
+          bbUpper: bbUpperData?.value,
+          bbMiddle: bbMiddleData?.value,
+          bbLower: bbLowerData?.value,
         });
       } else {
         setHoveredStats(null);
@@ -307,6 +348,10 @@ export function TradingViewContainer({
             volumeSeries.setData(formatVolumeData(merged));
             ema20Series.setData(buildEmaLineData(merged, 20));
             ema50Series.setData(buildEmaLineData(merged, 50));
+            const bbData = buildBollingerBandsData(merged, 20, 2);
+            bbUpperSeries.setData(bbData.upper);
+            bbMiddleSeries.setData(bbData.middle);
+            bbLowerSeries.setData(bbData.lower);
 
             // Maintain viewport offset seamlessly without jump
             const curRange = chart.timeScale().getVisibleLogicalRange();
@@ -348,6 +393,9 @@ export function TradingViewContainer({
       volumeSeriesRef.current = null;
       ema20SeriesRef.current = null;
       ema50SeriesRef.current = null;
+      bbUpperSeriesRef.current = null;
+      bbMiddleSeriesRef.current = null;
+      bbLowerSeriesRef.current = null;
       markersPluginRef.current = null;
     };
   }, [hasLibrary]);
@@ -385,6 +433,10 @@ export function TradingViewContainer({
             volumeSeriesRef.current.setData(formatVolumeData(sorted));
             ema20SeriesRef.current.setData(buildEmaLineData(sorted, 20));
             ema50SeriesRef.current.setData(buildEmaLineData(sorted, 50));
+            const bbData = buildBollingerBandsData(sorted, 20, 2);
+            bbUpperSeriesRef.current?.setData(bbData.upper);
+            bbMiddleSeriesRef.current?.setData(bbData.middle);
+            bbLowerSeriesRef.current?.setData(bbData.lower);
             chartRef.current?.timeScale().scrollToRealTime();
             setTimeout(() => {
               isInitialLoadDone.current = true;
@@ -465,13 +517,26 @@ export function TradingViewContainer({
         barsRef.current = updated;
         setBars(updated);
 
-        // Update latest EMA point
+        // Update latest EMA & Bollinger point
         const closes = updated.map((b) => b.close);
         if (closes.length >= 20) {
           const ema20Vals = ta.ema(closes, 20);
           const latestEma20 = ema20Vals[ema20Vals.length - 1];
           if (!isNaN(latestEma20)) {
             ema20SeriesRef.current?.update({ time: barTime, value: latestEma20 });
+          }
+          const bbVals = ta.bollingerbands(closes, 20, 2);
+          const latestBb = bbVals[bbVals.length - 1];
+          if (latestBb) {
+            if (latestBb.upper !== undefined) {
+              bbUpperSeriesRef.current?.update({ time: barTime, value: latestBb.upper });
+            }
+            if (latestBb.middle !== undefined) {
+              bbMiddleSeriesRef.current?.update({ time: barTime, value: latestBb.middle });
+            }
+            if (latestBb.lower !== undefined) {
+              bbLowerSeriesRef.current?.update({ time: barTime, value: latestBb.lower });
+            }
           }
         }
         if (closes.length >= 50) {
@@ -501,6 +566,10 @@ export function TradingViewContainer({
           volumeSeriesRef.current.setData(formatVolumeData(visibleBars));
           ema20SeriesRef.current.setData(buildEmaLineData(visibleBars, 20));
           ema50SeriesRef.current.setData(buildEmaLineData(visibleBars, 50));
+          const bbData = buildBollingerBandsData(visibleBars, 20, 2);
+          bbUpperSeriesRef.current?.setData(bbData.upper);
+          bbMiddleSeriesRef.current?.setData(bbData.middle);
+          bbLowerSeriesRef.current?.setData(bbData.lower);
         }
       },
     });
@@ -525,8 +594,15 @@ export function TradingViewContainer({
       activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
       activeIndicators.some((ind) => ind.toLowerCase().includes("ema"));
 
+    const hasBollinger =
+      activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
+
     ema20SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
     ema50SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
+    bbUpperSeriesRef.current?.applyOptions({ visible: hasBollinger });
+    bbMiddleSeriesRef.current?.applyOptions({ visible: hasBollinger });
+    bbLowerSeriesRef.current?.applyOptions({ visible: hasBollinger });
   }, [activeIndicators]);
 
   // 6. User Drawing Overlay Canvas
@@ -631,8 +707,10 @@ export function TradingViewContainer({
   const closes = bars.map((b) => b.close);
   const ema20Vals = closes.length >= 20 ? ta.ema(closes, 20) : [];
   const ema50Vals = closes.length >= 50 ? ta.ema(closes, 50) : [];
+  const bbVals = closes.length >= 20 ? ta.bollingerbands(closes, 20, 2) : [];
   const latestEma20 = ema20Vals.length > 0 ? ema20Vals[ema20Vals.length - 1] : null;
   const latestEma50 = ema50Vals.length > 0 ? ema50Vals[ema50Vals.length - 1] : null;
+  const latestBb = bbVals.length > 0 ? bbVals[bbVals.length - 1] : null;
 
   const displayBar = hoveredStats
     ? {
@@ -645,7 +723,18 @@ export function TradingViewContainer({
 
   const displayEma20 = hoveredStats?.ema20 ?? latestEma20;
   const displayEma50 = hoveredStats?.ema50 ?? latestEma50;
+  const displayBbUpper = hoveredStats?.bbUpper ?? latestBb?.upper;
+  const displayBbMiddle = hoveredStats?.bbMiddle ?? latestBb?.middle;
+  const displayBbLower = hoveredStats?.bbLower ?? latestBb?.lower;
   const displayVol = hoveredStats?.volume ?? lastBar?.volume;
+
+  const hasRibbonOrEma =
+    activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
+    activeIndicators.some((ind) => ind.toLowerCase().includes("ema"));
+
+  const hasBollinger =
+    activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+    activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
 
   return (
     <div
@@ -678,25 +767,63 @@ export function TradingViewContainer({
 
           {/* Indicator HUD Legend */}
           <div className="hidden lg:flex items-center gap-3 pl-3 border-l border-border shrink-0">
-            <div className="flex items-center gap-1.5 text-gold">
-              <span className="w-1.5 h-1.5 rounded-full bg-gold" />
-              <span>EMA 20</span>
-              <span className="text-on-surface">
-                {displayEma20 !== null && displayEma20 !== undefined
-                  ? displayEma20.toFixed(2)
-                  : "—"}
-              </span>
-            </div>
+            {hasRibbonOrEma && (
+              <>
+                <div className="flex items-center gap-1.5 text-gold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-gold" />
+                  <span>EMA 20</span>
+                  <span className="text-on-surface">
+                    {displayEma20 !== null && displayEma20 !== undefined
+                      ? displayEma20.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
 
-            <div className="flex items-center gap-1.5 text-cyan">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan" />
-              <span>EMA 50</span>
-              <span className="text-on-surface">
-                {displayEma50 !== null && displayEma50 !== undefined
-                  ? displayEma50.toFixed(2)
-                  : "—"}
-              </span>
-            </div>
+                <div className="flex items-center gap-1.5 text-cyan">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan" />
+                  <span>EMA 50</span>
+                  <span className="text-on-surface">
+                    {displayEma50 !== null && displayEma50 !== undefined
+                      ? displayEma50.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+              </>
+            )}
+
+            {hasBollinger && (
+              <>
+                <div className="flex items-center gap-1.5 text-[#2962ff]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff]" />
+                  <span>BB Up</span>
+                  <span className="text-on-surface">
+                    {displayBbUpper !== null && displayBbUpper !== undefined
+                      ? displayBbUpper.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-gold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-gold" />
+                  <span>BB Mid</span>
+                  <span className="text-on-surface">
+                    {displayBbMiddle !== null && displayBbMiddle !== undefined
+                      ? displayBbMiddle.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[#2962ff]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff]" />
+                  <span>BB Low</span>
+                  <span className="text-on-surface">
+                    {displayBbLower !== null && displayBbLower !== undefined
+                      ? displayBbLower.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+              </>
+            )}
 
             <div className="flex items-center gap-1.5 text-muted">
               <span>Vol</span>

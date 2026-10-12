@@ -149,3 +149,108 @@ export function mergeAndDeduplicateBars(
   }
   return Array.from(mergedMap.values()).sort((a, b) => a.time - b.time);
 }
+
+export interface BollingerBandsSeriesData {
+  upper: LineData<Time>[];
+  middle: LineData<Time>[];
+  lower: LineData<Time>[];
+}
+
+/**
+ * Calculates Bollinger Bands series (Upper, Middle, Lower) aligned with bar timestamps.
+ */
+export function buildBollingerBandsData(
+  bars: CandlestickBar[],
+  period = 20,
+  stdDev = 2
+): BollingerBandsSeriesData {
+  if (bars.length < period) return { upper: [], middle: [], lower: [] };
+  const sorted = [...bars].sort((a, b) => a.time - b.time);
+  const closes = sorted.map((b) => b.close);
+  const bb = ta.bollingerbands(closes, period, stdDev);
+  const offset = period - 1;
+
+  const upper: LineData<Time>[] = [];
+  const middle: LineData<Time>[] = [];
+  const lower: LineData<Time>[] = [];
+
+  for (let i = 0; i < bb.length; i++) {
+    const bar = sorted[i + offset];
+    if (bar && bb[i].upper !== undefined && bb[i].middle !== undefined && bb[i].lower !== undefined) {
+      const time = toUtcTimestamp(bar.time);
+      upper.push({ time, value: bb[i].upper! });
+      middle.push({ time, value: bb[i].middle! });
+      lower.push({ time, value: bb[i].lower! });
+    }
+  }
+
+  return { upper, middle, lower };
+}
+
+/**
+ * Calculates RSI line series aligned with bar timestamps.
+ */
+export function buildRsiData(bars: CandlestickBar[], period = 14): LineData<Time>[] {
+  if (bars.length <= period) return [];
+  const sorted = [...bars].sort((a, b) => a.time - b.time);
+  const closes = sorted.map((b) => b.close);
+  const rsi = ta.rsi(closes, period);
+  const offset = period;
+  const lineData: LineData<Time>[] = [];
+
+  for (let i = 0; i < rsi.length; i++) {
+    const bar = sorted[i + offset];
+    if (bar && !isNaN(rsi[i])) {
+      lineData.push({
+        time: toUtcTimestamp(bar.time),
+        value: rsi[i],
+      });
+    }
+  }
+
+  return lineData;
+}
+
+export interface MacdSeriesData {
+  macd: LineData<Time>[];
+  signal: LineData<Time>[];
+  histogram: HistogramData<Time>[];
+}
+
+/**
+ * Calculates MACD line, signal line, and histogram series aligned with bar timestamps.
+ */
+export function buildMacdData(
+  bars: CandlestickBar[],
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9
+): MacdSeriesData {
+  if (bars.length <= slowPeriod) return { macd: [], signal: [], histogram: [] };
+  const sorted = [...bars].sort((a, b) => a.time - b.time);
+  const closes = sorted.map((b) => b.close);
+  const macdResults = ta.macd(closes, fastPeriod, slowPeriod, signalPeriod);
+  const offset = slowPeriod - 1;
+
+  const macd: LineData<Time>[] = [];
+  const signal: LineData<Time>[] = [];
+  const histogram: HistogramData<Time>[] = [];
+
+  for (let i = 0; i < macdResults.length; i++) {
+    const bar = sorted[i + offset];
+    const item = macdResults[i];
+    if (bar && item.macd !== undefined && item.signal !== undefined && item.histogram !== undefined) {
+      const time = toUtcTimestamp(bar.time);
+      macd.push({ time, value: item.macd });
+      signal.push({ time, value: item.signal });
+      histogram.push({
+        time,
+        value: item.histogram,
+        color: item.histogram >= 0 ? "rgba(0, 192, 135, 0.65)" : "rgba(255, 59, 48, 0.65)",
+      });
+    }
+  }
+
+  return { macd, signal, histogram };
+}
+
