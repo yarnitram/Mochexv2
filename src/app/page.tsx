@@ -10,11 +10,18 @@ import { ReplaySimulationPill } from "@/components/terminal/ReplaySimulationPill
 import { TradingViewContainer } from "@/components/chart/TradingViewContainer";
 import { MobileTacticalDrawer } from "@/components/mobile/MobileTacticalDrawer";
 import { MobileBottomNav } from "@/components/mobile/MobileBottomNav";
+import { AuthModal } from "@/components/auth/AuthModal";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { CandlestickBar } from "@/lib/mexc/types";
 import { BacktestPerformance } from "@/lib/strategy/types";
+import { useAuth } from "@/lib/auth/use-auth";
+import { SavedLayoutItem } from "@/components/terminal/LayoutDropdown";
 
 export default function WorkstationPage() {
+  // Authentication session
+  const { user, login, register, logout } = useAuth();
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
   // Workspace state with localStorage persistence
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [resolution, setResolution] = useState("15");
@@ -54,11 +61,13 @@ export default function WorkstationPage() {
       const savedRes = localStorage.getItem("mochex:resolution");
       const savedSidebar = localStorage.getItem("mochex:sidebar_open");
       const savedStudio = localStorage.getItem("mochex:studio_open");
+      const savedIndicators = localStorage.getItem("mochex:active_indicators");
 
       if (savedSymbol) setSymbol(savedSymbol);
       if (savedRes) setResolution(savedRes);
       if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
       if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
+      if (savedIndicators) setActiveIndicators(JSON.parse(savedIndicators));
     } catch {
       // Ignore localStorage errors
     }
@@ -114,14 +123,26 @@ export default function WorkstationPage() {
   };
 
   const handleApplyIndicator = (name: string) => {
-    setActiveIndicators((prev) =>
-      prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]
-    );
+    setActiveIndicators((prev) => {
+      const next = prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name];
+      try {
+        localStorage.setItem("mochex:active_indicators", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
   };
 
   const handleClearDrawings = () => {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("mochex:clear-drawings"));
+    }
+  };
+
+  const handleLoadLayout = (layout: SavedLayoutItem) => {
+    if (layout.symbol) handleSelectSymbol(layout.symbol);
+    if (layout.resolution) handleSelectResolution(layout.resolution);
+    if (layout.content?.indicators && Array.isArray(layout.content.indicators)) {
+      setActiveIndicators(layout.content.indicators);
     }
   };
 
@@ -155,10 +176,14 @@ export default function WorkstationPage() {
         onToggleReplay={handleToggleReplay}
         onOpenIndicators={() => setIsIndicatorsModalOpen(true)}
         activeIndicatorsCount={activeIndicators.length}
+        activeIndicators={activeIndicators}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={handleToggleSidebar}
         isStudioOpen={isStudioOpen}
         onToggleStudio={handleToggleStudio}
+        user={user}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLoadLayout={handleLoadLayout}
       />
 
       {/* 2. Main Terminal Workspace Body */}
@@ -212,6 +237,7 @@ export default function WorkstationPage() {
             selectedSymbol={symbol}
             onSelectSymbol={handleSelectSymbol}
             currentPrice={marketStats.price}
+            user={user}
           />
         </div>
       </div>
@@ -241,6 +267,16 @@ export default function WorkstationPage() {
       <MobileBottomNav
         activeScreen={mobileScreen}
         onSelectScreen={handleSelectMobileScreen}
+      />
+
+      {/* 5. Cloud Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        user={user}
+        onLogin={login}
+        onRegister={register}
+        onLogout={logout}
       />
     </main>
   );

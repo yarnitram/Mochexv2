@@ -1,10 +1,22 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { Search, Plus, Bell, Flame, Star, ChevronRight, X } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  Search,
+  Plus,
+  Bell,
+  Flame,
+  Star,
+  ChevronDown,
+  Trash2,
+  X,
+  List,
+} from "lucide-react";
 import { mexcWsManager } from "@/lib/mexc/websocket";
 import { MexcMiniTickerItem } from "@/lib/mexc/types";
 import { OrderDepthLadder } from "./OrderDepthLadder";
+import { AddPairModal } from "../watchlist/AddPairModal";
+import { AuthUser } from "@/lib/auth/use-auth";
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -12,6 +24,7 @@ interface RightSidebarProps {
   selectedSymbol: string;
   onSelectSymbol: (symbol: string) => void;
   currentPrice?: number;
+  user?: AuthUser | null;
 }
 
 interface TickerRow {
@@ -40,9 +53,32 @@ export function RightSidebar({
   selectedSymbol,
   onSelectSymbol,
   currentPrice = 68420.5,
+  user,
 }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<"watchlist" | "alerts" | "hot">("watchlist");
   const [searchQuery, setSearchQuery] = useState("");
+  const [isAddPairOpen, setIsAddPairOpen] = useState(false);
+  const [isListDropdownOpen, setIsListDropdownOpen] = useState(false);
+
+  // Named Watchlists state
+  const [activeListName, setActiveListName] = useState("Core Majors");
+  const [availableLists, setAvailableLists] = useState<string[]>([
+    "Core Majors",
+    "Layer 1s",
+    "Meme Coins",
+  ]);
+
+  const [activeSymbols, setActiveSymbols] = useState<string[]>([
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "MXUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "BNBUSDT",
+    "SUIUSDT",
+  ]);
+
   const [tickers, setTickers] = useState<Record<string, TickerRow>>(() => {
     const map: Record<string, TickerRow> = {};
     DEFAULT_WATCHLIST.forEach((t) => {
@@ -51,6 +87,31 @@ export function RightSidebar({
     return map;
   });
 
+  // Sync cloud watchlists
+  const fetchCloudWatchlists = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await fetch("/api/watchlists", { credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const names = data.map((d: any) => d.name);
+          setAvailableLists(names);
+          const first = data[0];
+          setActiveListName(first.name);
+          if (Array.isArray(first.symbols)) {
+            setActiveSymbols(first.symbols);
+          }
+        }
+      }
+    } catch {}
+  }, [user]);
+
+  useEffect(() => {
+    fetchCloudWatchlists();
+  }, [fetchCloudWatchlists]);
+
+  // WebSocket Live Price updates
   useEffect(() => {
     mexcWsManager.connect();
     const handleTickers = (items: MexcMiniTickerItem[]) => {
@@ -78,11 +139,58 @@ export function RightSidebar({
     };
   }, []);
 
+  const handleAddSymbol = async (sym: string) => {
+    if (activeSymbols.includes(sym)) return;
+    const nextSymbols = [...activeSymbols, sym];
+    setActiveSymbols(nextSymbols);
+
+    // Seed ticker row if not present
+    if (!tickers[sym]) {
+      setTickers((prev) => ({
+        ...prev,
+        [sym]: {
+          symbol: sym,
+          price: 1.0,
+          change: 0.0,
+          high: 1.05,
+          low: 0.95,
+          volume: 50000,
+        },
+      }));
+    }
+
+    if (user) {
+      try {
+        await fetch("/api/watchlists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            name: activeListName,
+            symbols: nextSymbols,
+            isDefault: true,
+          }),
+        });
+      } catch {}
+    } else if (typeof window !== "undefined") {
+      localStorage.setItem("mochex:watchlist_symbols", JSON.stringify(nextSymbols));
+    }
+  };
+
+  const handleRemoveSymbol = (sym: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const nextSymbols = activeSymbols.filter((s) => s !== sym);
+    setActiveSymbols(nextSymbols);
+    if (!user && typeof window !== "undefined") {
+      localStorage.setItem("mochex:watchlist_symbols", JSON.stringify(nextSymbols));
+    }
+  };
+
   if (!isOpen) return null;
 
-  const tickerList = Object.values(tickers).filter((t) =>
-    t.symbol.toLowerCase().includes(searchQuery.toLowerCase().trim())
-  );
+  const tickerList = activeSymbols
+    .map((sym) => tickers[sym] || { symbol: sym, price: 1.0, change: 0, high: 1, low: 1, volume: 1000 })
+    .filter((t) => t.symbol.toLowerCase().includes(searchQuery.toLowerCase().trim()));
 
   return (
     <aside className="w-80 bg-surface-container-lowest border-l border-border flex flex-col h-full select-none shrink-0 z-20">
@@ -132,7 +240,42 @@ export function RightSidebar({
         </button>
       </div>
 
-      {/* Search Input + Add Pair */}
+      {/* Named Watchlist Selector Ribbon */}
+      <div className="px-2.5 py-1.5 border-b border-border bg-surface-container-low flex items-center justify-between text-xs font-mono">
+        <div className="relative">
+          <button
+            onClick={() => setIsListDropdownOpen(!isListDropdownOpen)}
+            className="flex items-center gap-1 text-on-surface hover:text-primary font-semibold transition-colors"
+          >
+            <List size={12} className="text-muted" />
+            <span>{activeListName}</span>
+            <ChevronDown size={11} className="text-muted" />
+          </button>
+
+          {isListDropdownOpen && (
+            <div className="absolute top-full left-0 mt-1 w-44 bg-surface-container-low border border-border rounded shadow-xl py-1 z-50">
+              {availableLists.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => {
+                    setActiveListName(name);
+                    setIsListDropdownOpen(false);
+                  }}
+                  className={`w-full text-left px-2.5 py-1.5 text-xs hover:bg-surface-container transition-colors ${
+                    name === activeListName ? "text-primary font-bold" : "text-on-surface"
+                  }`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <span className="text-[10px] text-muted">{tickerList.length} pairs</span>
+      </div>
+
+      {/* Search Input + Add Pair Action */}
       <div className="p-2 border-b border-border bg-surface-container-lowest flex items-center gap-2">
         <div className="flex-1 relative flex items-center">
           <Search size={13} className="absolute left-2.5 text-muted pointer-events-none" />
@@ -140,12 +283,13 @@ export function RightSidebar({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search pair..."
+            placeholder="Search pair in list..."
             className="w-full bg-surface-container-low text-on-surface placeholder-muted text-xs font-mono pl-7 pr-2 py-1.5 rounded border border-outline-variant/30 focus:outline-hidden focus:border-primary-container transition-colors"
           />
         </div>
         <button
-          title="Add Custom Pair"
+          onClick={() => setIsAddPairOpen(true)}
+          title="Add MEXC Spot Pair to Watchlist"
           className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-primary border border-outline-variant/30 transition-colors shrink-0"
         >
           <Plus size={14} />
@@ -168,7 +312,7 @@ export function RightSidebar({
             <div
               key={t.symbol}
               onClick={() => onSelectSymbol(t.symbol)}
-              className={`grid grid-cols-12 items-center px-3 py-2 cursor-pointer transition-colors border-b border-border/40 ${
+              className={`grid grid-cols-12 items-center px-3 py-2 cursor-pointer transition-colors border-b border-border/40 group ${
                 isSelected
                   ? "bg-surface-container-high border-l-2 border-l-primary-container"
                   : "hover:bg-surface-container-low"
@@ -190,8 +334,8 @@ export function RightSidebar({
                 {t.price >= 1 ? t.price.toFixed(2) : t.price.toFixed(4)}
               </div>
 
-              {/* Change Pill */}
-              <div className="col-span-3 flex justify-end">
+              {/* Change Pill + Quick Remove */}
+              <div className="col-span-3 flex items-center justify-end gap-1">
                 <span
                   className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded text-right ${
                     isPositive
@@ -202,6 +346,14 @@ export function RightSidebar({
                   {isPositive ? "+" : ""}
                   {t.change.toFixed(2)}%
                 </span>
+
+                <button
+                  onClick={(e) => handleRemoveSymbol(t.symbol, e)}
+                  title="Remove from watchlist"
+                  className="hidden group-hover:block text-muted hover:text-tertiary transition-colors ml-1"
+                >
+                  <Trash2 size={11} />
+                </button>
               </div>
             </div>
           );
@@ -210,6 +362,14 @@ export function RightSidebar({
 
       {/* Mini Order Depth Ladder Component */}
       <OrderDepthLadder symbol={selectedSymbol} currentPrice={currentPrice} />
+
+      {/* Add Pair Search Modal */}
+      <AddPairModal
+        isOpen={isAddPairOpen}
+        onClose={() => setIsAddPairOpen(false)}
+        existingSymbols={activeSymbols}
+        onAddSymbol={handleAddSymbol}
+      />
     </aside>
   );
 }

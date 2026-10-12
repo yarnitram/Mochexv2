@@ -4,18 +4,18 @@ import React, { useState } from "react";
 import {
   CandlestickChart,
   ChevronDown,
-  TrendingUp,
   RotateCcw,
-  Camera,
-  Cloud,
   Maximize2,
   Minimize2,
   PanelRight,
   Code2,
-  Bell,
   Check,
-  Search,
+  User,
+  Shield,
+  Sparkles,
 } from "lucide-react";
+import { AuthUser } from "@/lib/auth/use-auth";
+import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
 
 interface TacticalHeaderProps {
   symbol: string;
@@ -31,10 +31,14 @@ interface TacticalHeaderProps {
   onToggleReplay: () => void;
   onOpenIndicators: () => void;
   activeIndicatorsCount: number;
+  activeIndicators?: string[];
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
   isStudioOpen: boolean;
   onToggleStudio: () => void;
+  user?: AuthUser | null;
+  onOpenAuthModal?: () => void;
+  onLoadLayout?: (layout: SavedLayoutItem) => void;
 }
 
 const TIMEFRAMES = [
@@ -63,22 +67,20 @@ export function TacticalHeader({
   onToggleReplay,
   onOpenIndicators,
   activeIndicatorsCount,
+  activeIndicators = [],
   isSidebarOpen,
   onToggleSidebar,
   isStudioOpen,
   onToggleStudio,
+  user = null,
+  onOpenAuthModal,
+  onLoadLayout = () => {},
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
-  const [isLayoutSaved, setIsLayoutSaved] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const formattedSymbol = symbol.replace("USDT", "/USDT");
   const isPositive = change24h >= 0;
-
-  const handleSaveLayout = () => {
-    setIsLayoutSaved(true);
-    setTimeout(() => setIsLayoutSaved(false), 2000);
-  };
 
   const handleToggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -229,7 +231,7 @@ export function TacticalHeader({
         </button>
       </div>
 
-      {/* Right: Studio Toggle + Layout Actions + User Profile */}
+      {/* Right: Studio Toggle + Layout Manager Dropdown + User Profile */}
       <div className="flex items-center gap-1.5">
         {/* Script Studio Dock Toggle */}
         <button
@@ -244,14 +246,17 @@ export function TacticalHeader({
           <Code2 size={15} />
         </button>
 
-        {/* Save Layout Action */}
-        <button
-          onClick={handleSaveLayout}
-          className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container border border-outline-variant/30 text-on-surface text-xs font-mono transition-colors"
-        >
-          <Cloud size={13} className={isLayoutSaved ? "text-secondary" : "text-muted"} />
-          <span>{isLayoutSaved ? "Saved" : "Save Layout"}</span>
-        </button>
+        {/* Multi-Layout Manager Dropdown */}
+        <div className="hidden sm:block">
+          <LayoutDropdown
+            currentSymbol={symbol}
+            currentResolution={resolution}
+            currentIndicators={activeIndicators}
+            user={user}
+            onLoadLayout={onLoadLayout}
+            onOpenAuthModal={onOpenAuthModal || (() => {})}
+          />
+        </div>
 
         {/* Fullscreen Toggle */}
         <button
@@ -277,15 +282,32 @@ export function TacticalHeader({
 
         <div className="h-4 w-px bg-border mx-0.5" />
 
-        {/* User Profile Badge */}
-        <div className="flex items-center gap-2 pl-1">
+        {/* User Profile / Auth Pill Button */}
+        <button
+          onClick={onOpenAuthModal}
+          className="flex items-center gap-1.5 p-1 rounded hover:bg-surface-container transition-colors pl-1 cursor-pointer"
+          title={user ? `${user.username} (${user.role})` : "Guest Mode - Click to Sign In"}
+        >
           <div className="relative">
             <div className="w-6 h-6 rounded-full bg-gradient-to-br from-primary-container to-blue-700 flex items-center justify-center text-[10px] font-bold text-white shadow-xs">
-              YM
+              {user ? user.username.slice(0, 2).toUpperCase() : "YM"}
             </div>
-            <div className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-secondary border border-surface" />
+            <div
+              className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-surface ${
+                user ? "bg-secondary" : "bg-cyan"
+              }`}
+            />
           </div>
-        </div>
+
+          <div className="hidden lg:flex flex-col text-left">
+            <span className="text-[11px] font-mono font-bold leading-none text-on-surface">
+              {user ? user.username : "Guest"}
+            </span>
+            <span className="text-[9px] font-mono text-muted leading-tight">
+              {user ? user.role : "Sign In"}
+            </span>
+          </div>
+        </button>
       </div>
     </header>
   );
