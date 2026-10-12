@@ -33,6 +33,9 @@ export default function WorkstationPage() {
 
   // Active tools & indicators
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("crosshair");
+  const [isMagnetActive, setIsMagnetActive] = useState(true);
+  const [isDrawingsLocked, setIsDrawingsLocked] = useState(false);
+  const [isDrawingsHidden, setIsDrawingsHidden] = useState(false);
   const [activeIndicators, setActiveIndicators] = useState<string[]>([
     "EMA Ribbon Momentum Multi-Timeframe",
   ]);
@@ -204,6 +207,12 @@ export default function WorkstationPage() {
           <DrawingRail
             activeTool={activeDrawingTool}
             onSelectTool={setActiveDrawingTool}
+            isMagnetActive={isMagnetActive}
+            onToggleMagnet={() => setIsMagnetActive((prev) => !prev)}
+            isLocked={isDrawingsLocked}
+            onToggleLock={() => setIsDrawingsLocked((prev) => !prev)}
+            isHidden={isDrawingsHidden}
+            onToggleHide={() => setIsDrawingsHidden((prev) => !prev)}
             onClearAll={handleClearDrawings}
           />
         </div>
@@ -215,6 +224,10 @@ export default function WorkstationPage() {
               symbol={symbol}
               resolution={resolution}
               activeDrawingTool={activeDrawingTool}
+              onSelectDrawingTool={setActiveDrawingTool}
+              isMagnetActive={isMagnetActive}
+              isDrawingsLocked={isDrawingsLocked}
+              isDrawingsHidden={isDrawingsHidden}
               activeIndicators={activeIndicators}
               onToggleIndicator={handleApplyIndicator}
               trades={strategyResult?.trades || []}

@@ -7,9 +7,17 @@ import { mexcWsManager } from "@/lib/mexc/websocket";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers, Settings, X } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestTrade } from "@/lib/strategy/types";
+import {
+  ChartDrawing,
+  calculateFibLevels,
+  calculatePositionMetrics,
+  calculateRulerMetrics,
+  findNearestCandlePoint,
+  isPointNearSegment,
+} from "@/lib/chart/drawing-math";
 import {
   createChart,
   ColorType,
@@ -44,6 +52,10 @@ interface TradingViewContainerProps {
   symbol: string;
   resolution: string;
   activeDrawingTool?: DrawingToolType;
+  onSelectDrawingTool?: (tool: DrawingToolType) => void;
+  isMagnetActive?: boolean;
+  isDrawingsLocked?: boolean;
+  isDrawingsHidden?: boolean;
   activeIndicators?: string[];
   onToggleIndicator?: (name: string) => void;
   trades?: BacktestTrade[];
@@ -61,16 +73,6 @@ declare global {
   interface Window {
     TradingView?: any;
   }
-}
-
-interface DrawnShape {
-  type: DrawingToolType;
-  startX: number;
-  startY: number;
-  endX: number;
-  endY: number;
-  startPrice: number;
-  endPrice: number;
 }
 
 interface HoveredStats {
@@ -94,6 +96,10 @@ export function TradingViewContainer({
   symbol,
   resolution,
   activeDrawingTool = "none",
+  onSelectDrawingTool,
+  isMagnetActive = true,
+  isDrawingsLocked = false,
+  isDrawingsHidden = false,
   activeIndicators = ["EMA Ribbon Momentum Multi-Timeframe"],
   onToggleIndicator,
   trades = [],
@@ -157,11 +163,28 @@ export function TradingViewContainer({
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [hoveredStats, setHoveredStats] = useState<HoveredStats | null>(null);
 
-  // Drawing tools overlay state
-  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  // Geometric drawing tools state (DEC-040 to DEC-044)
+  const [drawings, setDrawings] = useState<ChartDrawing[]>([]);
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [inFlightDrawing, setInFlightDrawing] = useState<ChartDrawing | null>(null);
+  const [drawingStep, setDrawingStep] = useState<0 | 1>(0);
+  const [draggedHandle, setDraggedHandle] = useState<"start" | "end" | "body" | null>(null);
+  const [dragStartPos, setDragStartPos] = useState<{
+    x: number;
+    y: number;
+    startTime: number;
+    endTime: number;
+    startPrice: number;
+    endPrice: number;
+  } | null>(null);
+  const [snappedPoint, setSnappedPoint] = useState<{
+    time: number;
+    price: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [isHoveringDrawing, setIsHoveringDrawing] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
-  const [drawnShapes, setDrawnShapes] = useState<DrawnShape[]>([]);
 
   // 1. Check for proprietary TradingView library drop-in
   useEffect(() => {
@@ -891,12 +914,521 @@ export function TradingViewContainer({
     macdSignal,
   ]);
 
-  // 6. User Drawing Overlay Canvas
+  // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
+  const DRAWING_COLORS = [
+    "#2962ff",
+    "#00c087",
+    "#ff3b30",
+    "#f5ac37",
+    "#9353d3",
+    "#00d8ff",
+    "#ffffff",
+  ];
+
+  // Coordinate Projection Helpers (DEC-040)
+  const timeToCoordinate = useCallback((timeMs: number): number | null => {
+    if (!chartRef.current) return null;
+    const utcSec = toUtcTimestamp(timeMs);
+    const coord = chartRef.current.timeScale().timeToCoordinate(utcSec);
+    return coord !== null ? Number(coord) : null;
+  }, []);
+
+  const coordinateToTime = useCallback((x: number): number | null => {
+    if (!chartRef.current) return null;
+    const t = chartRef.current.timeScale().coordinateToTime(x);
+    if (t !== null && typeof t === "number") {
+      return t * 1000;
+    }
+    if (barsRef.current.length > 0) {
+      if (x <= 0) return barsRef.current[0].time;
+      return barsRef.current[barsRef.current.length - 1].time;
+    }
+    return null;
+  }, []);
+
+  const priceToCoordinate = useCallback((price: number): number | null => {
+    if (!candleSeriesRef.current) return null;
+    const coord = candleSeriesRef.current.priceToCoordinate(price);
+    return coord !== null ? Number(coord) : null;
+  }, []);
+
+  const coordinateToPrice = useCallback((y: number): number | null => {
+    if (!candleSeriesRef.current) return null;
+    const p = candleSeriesRef.current.coordinateToPrice(y);
+    return p !== null ? Number(p) : null;
+  }, []);
+
+  const getSafeScreenX = useCallback(
+    (timeMs: number): number | null => {
+      const coord = timeToCoordinate(timeMs);
+      if (coord !== null) return coord;
+      if (barsRef.current.length > 1) {
+        const firstBar = barsRef.current[0];
+        const lastBar = barsRef.current[barsRef.current.length - 1];
+        const firstX = timeToCoordinate(firstBar.time);
+        const lastX = timeToCoordinate(lastBar.time);
+        if (firstX !== null && lastX !== null && lastBar.time > firstBar.time) {
+          const pxPerMs = (lastX - firstX) / (lastBar.time - firstBar.time);
+          if (timeMs < firstBar.time) return firstX + (timeMs - firstBar.time) * pxPerMs;
+          if (timeMs > lastBar.time) return lastX + (timeMs - lastBar.time) * pxPerMs;
+        }
+      }
+      return null;
+    },
+    [timeToCoordinate]
+  );
+
+  const getSafeScreenY = useCallback(
+    (price: number): number | null => {
+      const coord = priceToCoordinate(price);
+      return coord !== null ? coord : null;
+    },
+    [priceToCoordinate]
+  );
+
+  // Symbol-Scoped Persistence (DEC-044)
   useEffect(() => {
-    const handleClearDrawings = () => setDrawnShapes([]);
+    if (!symbol) return;
+    const storageKey = `mochex:drawings:${symbol}`;
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setDrawings(parsed);
+        } else {
+          setDrawings([]);
+        }
+      } else {
+        setDrawings([]);
+      }
+    } catch {
+      setDrawings([]);
+    }
+    setSelectedDrawingId(null);
+    setInFlightDrawing(null);
+    setDrawingStep(0);
+  }, [symbol]);
+
+  const saveDrawings = useCallback((newDrawings: ChartDrawing[]) => {
+    setDrawings(newDrawings);
+    if (!symbolRef.current) return;
+    try {
+      localStorage.setItem(`mochex:drawings:${symbolRef.current}`, JSON.stringify(newDrawings));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const handleClearDrawings = () => {
+      saveDrawings([]);
+      setSelectedDrawingId(null);
+      setInFlightDrawing(null);
+      setDrawingStep(0);
+    };
     window.addEventListener("mochex:clear-drawings", handleClearDrawings);
     return () => window.removeEventListener("mochex:clear-drawings", handleClearDrawings);
-  }, []);
+  }, [saveDrawings]);
+
+  // Specialized Geometric Renderers (DEC-041)
+  const renderTrendline = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      color: string,
+      startPrice: number,
+      endPrice: number,
+      startTime: number,
+      endTime: number
+    ) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      const deltaPrice = endPrice - startPrice;
+      const deltaPercent = startPrice > 0 ? ((deltaPrice / startPrice) * 100).toFixed(2) : "0.00";
+      const minTime = Math.min(startTime, endTime);
+      const maxTime = Math.max(startTime, endTime);
+      const barCount = Math.max(
+        1,
+        barsRef.current.filter((b) => b.time >= minTime && b.time <= maxTime).length
+      );
+      const badgeText = `${deltaPrice >= 0 ? "+" : ""}${deltaPrice.toFixed(2)} (${deltaPrice >= 0 ? "+" : ""}${deltaPercent}%) · ${barCount}b`;
+
+      const midX = (x1 + x2) / 2;
+      const midY = (y1 + y2) / 2;
+
+      ctx.font = "10px monospace";
+      const textWidth = ctx.measureText(badgeText).width;
+      const padX = 6;
+      const padY = 3;
+
+      ctx.fillStyle = "rgba(10, 20, 31, 0.85)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(midX - textWidth / 2 - padX, midY - 9 - padY, textWidth + padX * 2, 16 + padY * 2, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = deltaPrice >= 0 ? "#00c087" : "#ff3b30";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(badgeText, midX, midY);
+    },
+    []
+  );
+
+  const renderFibonacci = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      startPrice: number,
+      endPrice: number
+    ) => {
+      const levels = calculateFibLevels(startPrice, endPrice);
+      const leftX = Math.min(x1, x2);
+      const rightX = Math.max(x1, x2) + 60;
+
+      for (let i = 0; i < levels.length - 1; i++) {
+        const lvlA = levels[i];
+        const lvlB = levels[i + 1];
+        const yA = getSafeScreenY(lvlA.price);
+        const yB = getSafeScreenY(lvlB.price);
+        if (yA !== null && yB !== null) {
+          ctx.fillStyle = lvlB.bg;
+          ctx.fillRect(leftX, Math.min(yA, yB), rightX - leftX, Math.abs(yB - yA));
+        }
+      }
+
+      levels.forEach((lvl) => {
+        const y = getSafeScreenY(lvl.price);
+        if (y === null) return;
+
+        ctx.strokeStyle = lvl.color;
+        ctx.lineWidth = lvl.ratio === 0 || lvl.ratio === 1 || lvl.ratio === 0.618 ? 1.5 : 1;
+        if (lvl.ratio !== 0 && lvl.ratio !== 1 && lvl.ratio !== 0.618) {
+          ctx.setLineDash([4, 4]);
+        } else {
+          ctx.setLineDash([]);
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(leftX, y);
+        ctx.lineTo(rightX, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const label = `${lvl.ratio} ($${lvl.price.toFixed(2)})`;
+        ctx.font = "10px monospace";
+        ctx.fillStyle = lvl.color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(label, leftX + 4, y - 2);
+      });
+    },
+    [getSafeScreenY]
+  );
+
+  const renderPosition = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      startPrice: number,
+      endPrice: number
+    ) => {
+      const metrics = calculatePositionMetrics(startPrice, endPrice);
+      const yEntry = getSafeScreenY(metrics.entryPrice);
+      const yTarget = getSafeScreenY(metrics.targetPrice);
+      const yStop = getSafeScreenY(metrics.stopPrice);
+
+      if (yEntry === null || yTarget === null || yStop === null) return;
+
+      const leftX = Math.min(x1, x2);
+      const boxWidth = Math.max(80, Math.abs(x2 - x1));
+      const rightX = leftX + boxWidth;
+
+      // Profit Zone
+      const profitTop = Math.min(yEntry, yTarget);
+      const profitHeight = Math.abs(yTarget - yEntry);
+      ctx.fillStyle = "rgba(0, 192, 135, 0.15)";
+      ctx.fillRect(leftX, profitTop, boxWidth, profitHeight);
+      ctx.strokeStyle = "rgba(0, 192, 135, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(leftX, profitTop, boxWidth, profitHeight);
+
+      ctx.font = "10px monospace";
+      ctx.fillStyle = "#00c087";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(
+        `Target: +${Math.abs(metrics.targetPercent).toFixed(2)}% ($${metrics.targetPrice.toFixed(2)})`,
+        leftX + 6,
+        profitTop + 4
+      );
+
+      // Stop Zone
+      const stopTop = Math.min(yEntry, yStop);
+      const stopHeight = Math.abs(yStop - yEntry);
+      ctx.fillStyle = "rgba(255, 59, 48, 0.15)";
+      ctx.fillRect(leftX, stopTop, boxWidth, stopHeight);
+      ctx.strokeStyle = "rgba(255, 59, 48, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(leftX, stopTop, boxWidth, stopHeight);
+
+      ctx.fillStyle = "#ff3b30";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(
+        `Stop: -${Math.abs(metrics.stopPercent).toFixed(2)}% ($${metrics.stopPrice.toFixed(2)})`,
+        leftX + 6,
+        stopTop + stopHeight - 4
+      );
+
+      // Entry line & R:R badge
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(leftX, yEntry);
+      ctx.lineTo(rightX, yEntry);
+      ctx.stroke();
+
+      const rrText = `R:R ${metrics.riskRewardRatio.toFixed(2)}`;
+      ctx.font = "10px monospace";
+      const badgeW = ctx.measureText(rrText).width + 12;
+      ctx.fillStyle = "#0a141f";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(leftX + (boxWidth - badgeW) / 2, yEntry - 9, badgeW, 18, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(rrText, leftX + boxWidth / 2, yEntry);
+    },
+    [getSafeScreenY]
+  );
+
+  const renderRuler = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      startPrice: number,
+      endPrice: number,
+      startTime: number,
+      endTime: number
+    ) => {
+      const metrics = calculateRulerMetrics(
+        startPrice,
+        endPrice,
+        startTime,
+        endTime,
+        barsRef.current
+      );
+      const rx = Math.min(x1, x2);
+      const ry = Math.min(y1, y2);
+      const rw = Math.abs(x2 - x1);
+      const rh = Math.abs(y2 - y1);
+
+      ctx.fillStyle = "rgba(41, 98, 255, 0.08)";
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeStyle = "rgba(41, 98, 255, 0.75)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.setLineDash([]);
+
+      ctx.strokeStyle = "#2962ff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      const mins = Math.round(metrics.durationMs / 60000);
+      const durStr = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+      const badgeText = `${metrics.deltaPrice >= 0 ? "+" : ""}${metrics.deltaPrice.toFixed(2)} (${metrics.deltaPercent >= 0 ? "+" : ""}${metrics.deltaPercent.toFixed(2)}%) · ${metrics.barCount} bars · ${durStr}`;
+
+      ctx.font = "10px monospace";
+      const textW = ctx.measureText(badgeText).width;
+      const midX = rx + rw / 2;
+      const midY = ry + rh / 2;
+
+      ctx.fillStyle = "rgba(10, 20, 31, 0.88)";
+      ctx.strokeStyle = "rgba(41, 98, 255, 0.5)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(midX - textW / 2 - 8, midY - 10, textW + 16, 20, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = metrics.deltaPrice >= 0 ? "#00c087" : "#ff3b30";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(badgeText, midX, midY);
+    },
+    []
+  );
+
+  const renderBrush = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      color: string
+    ) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    },
+    []
+  );
+
+  const renderText = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      text: string,
+      color: string
+    ) => {
+      ctx.font = "12px monospace";
+      const textW = ctx.measureText(text).width;
+      ctx.fillStyle = "rgba(10, 20, 31, 0.85)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(x1 - 4, y1 - 16, textW + 8, 22, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, x1, y1 - 5);
+    },
+    []
+  );
+
+  const renderHandles = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number
+    ) => {
+      const handles = [
+        { x: x1, y: y1, r: 4.5, fill: "#ffffff", stroke: "#2962ff" },
+        { x: x2, y: y2, r: 4.5, fill: "#ffffff", stroke: "#2962ff" },
+        { x: (x1 + x2) / 2, y: (y1 + y2) / 2, r: 3.5, fill: "#2962ff", stroke: "#ffffff" },
+      ];
+
+      handles.forEach((h) => {
+        ctx.fillStyle = h.fill;
+        ctx.strokeStyle = h.stroke;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+    },
+    []
+  );
+
+  // Hit-Testing for Selection & Handle Dragging (DEC-043)
+  const getHitTestResult = useCallback(
+    (x: number, y: number) => {
+      if (isDrawingsHidden || drawings.length === 0) return null;
+
+      for (let i = drawings.length - 1; i >= 0; i--) {
+        const d = drawings[i];
+        const x1 = getSafeScreenX(d.startTime);
+        const y1 = getSafeScreenY(d.startPrice);
+        const x2 = getSafeScreenX(d.endTime);
+        const y2 = getSafeScreenY(d.endPrice);
+        if (x1 === null || y1 === null || x2 === null || y2 === null) continue;
+
+        if (Math.hypot(x - x1, y - y1) <= 9) {
+          return { drawing: d, handle: "start" as const };
+        }
+        if (Math.hypot(x - x2, y - y2) <= 9) {
+          return { drawing: d, handle: "end" as const };
+        }
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+        if (Math.hypot(x - midX, y - midY) <= 8) {
+          return { drawing: d, handle: "body" as const };
+        }
+
+        if (d.type === "position") {
+          const metrics = calculatePositionMetrics(d.startPrice, d.endPrice);
+          const yTarget = getSafeScreenY(metrics.targetPrice);
+          const yStop = getSafeScreenY(metrics.stopPrice);
+          if (yTarget !== null && yStop !== null) {
+            const minY = Math.min(y1, yTarget, yStop);
+            const maxY = Math.max(y1, yTarget, yStop);
+            const minX = Math.min(x1, x2);
+            const maxX = minX + Math.max(80, Math.abs(x2 - x1));
+            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+              return { drawing: d, handle: "body" as const };
+            }
+          }
+        } else if (d.type === "ruler") {
+          const minX = Math.min(x1, x2);
+          const maxX = Math.max(x1, x2);
+          const minY = Math.min(y1, y2);
+          const maxY = Math.max(y1, y2);
+          if (x >= minX - 4 && x <= maxX + 4 && y >= minY - 4 && y <= maxY + 4) {
+            return { drawing: d, handle: "body" as const };
+          }
+        } else if (d.type === "fibonacci") {
+          const levels = calculateFibLevels(d.startPrice, d.endPrice);
+          const minX = Math.min(x1, x2);
+          const maxX = Math.max(x1, x2) + 60;
+          if (x >= minX - 4 && x <= maxX + 4) {
+            for (const lvl of levels) {
+              const ly = getSafeScreenY(lvl.price);
+              if (ly !== null && Math.abs(y - ly) <= 6) {
+                return { drawing: d, handle: "body" as const };
+              }
+            }
+          }
+        } else {
+          if (isPointNearSegment(x, y, x1, y1, x2, y2, 8)) {
+            return { drawing: d, handle: "body" as const };
+          }
+        }
+      }
+
+      return null;
+    },
+    [isDrawingsHidden, drawings, getSafeScreenX, getSafeScreenY]
+  );
 
   const renderDrawingCanvas = useCallback(() => {
     const canvas = drawingCanvasRef.current;
@@ -907,85 +1439,415 @@ export function TradingViewContainer({
 
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const targetW = Math.floor(rect.width * dpr);
+    const targetH = Math.floor(rect.height * dpr);
 
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Render persistent user annotations
-    drawnShapes.forEach((shape) => {
-      ctx.strokeStyle = "#2962ff";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(shape.startX, shape.startY);
-      ctx.lineTo(shape.endX, shape.endY);
-      ctx.stroke();
+    // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044)
+    if (!isDrawingsHidden) {
+      drawings.forEach((d) => {
+        const x1 = getSafeScreenX(d.startTime);
+        const y1 = getSafeScreenY(d.startPrice);
+        const x2 = getSafeScreenX(d.endTime);
+        const y2 = getSafeScreenY(d.endPrice);
+        if (x1 === null || y1 === null || x2 === null || y2 === null) return;
 
-      // Anchor handles
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(shape.startX, shape.startY, 3.5, 0, Math.PI * 2);
-      ctx.arc(shape.endX, shape.endY, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    });
+        const color = d.color || "#2962ff";
+        if (d.type === "trendline") {
+          renderTrendline(ctx, x1, y1, x2, y2, color, d.startPrice, d.endPrice, d.startTime, d.endTime);
+        } else if (d.type === "fibonacci") {
+          renderFibonacci(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice);
+        } else if (d.type === "position") {
+          renderPosition(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice);
+        } else if (d.type === "ruler") {
+          renderRuler(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice, d.startTime, d.endTime);
+        } else if (d.type === "brush") {
+          renderBrush(ctx, x1, y1, x2, y2, color);
+        } else if (d.type === "text") {
+          renderText(ctx, x1, y1, d.text || "Note", color);
+        }
 
-    // Render in-flight active drawing tool preview
-    if (isDrawing && dragStart && mousePos && activeDrawingTool !== "crosshair") {
-      ctx.strokeStyle = "#b6c4ff";
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(dragStart.x, dragStart.y);
-      ctx.lineTo(mousePos.x, mousePos.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
+        if (d.id === selectedDrawingId) {
+          renderHandles(ctx, x1, y1, x2, y2);
+        }
+      });
     }
-  }, [drawnShapes, isDrawing, dragStart, mousePos, activeDrawingTool]);
+
+    // 2. Render in-flight active drawing tool preview
+    if (inFlightDrawing && !isDrawingsHidden) {
+      const x1 = getSafeScreenX(inFlightDrawing.startTime);
+      const y1 = getSafeScreenY(inFlightDrawing.startPrice);
+      const x2 = getSafeScreenX(inFlightDrawing.endTime);
+      const y2 = getSafeScreenY(inFlightDrawing.endPrice);
+
+      if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
+        const color = inFlightDrawing.color || "#b6c4ff";
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+
+        if (inFlightDrawing.type === "trendline") {
+          ctx.setLineDash([4, 4]);
+          renderTrendline(ctx, x1, y1, x2, y2, color, inFlightDrawing.startPrice, inFlightDrawing.endPrice, inFlightDrawing.startTime, inFlightDrawing.endTime);
+        } else if (inFlightDrawing.type === "fibonacci") {
+          renderFibonacci(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice);
+        } else if (inFlightDrawing.type === "position") {
+          renderPosition(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice);
+        } else if (inFlightDrawing.type === "ruler") {
+          renderRuler(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice, inFlightDrawing.startTime, inFlightDrawing.endTime);
+        } else if (inFlightDrawing.type === "brush") {
+          renderBrush(ctx, x1, y1, x2, y2, color);
+        } else if (inFlightDrawing.type === "text") {
+          renderText(ctx, x1, y1, "Note", color);
+        }
+        ctx.restore();
+      }
+    }
+
+    // 3. Smart Magnet Snapping Indicator (DEC-042)
+    if (snappedPoint && isMagnetActive && (isDrawing || drawingStep === 1 || activeDrawingTool !== "none")) {
+      ctx.save();
+      ctx.strokeStyle = "#00d8ff";
+      ctx.fillStyle = "rgba(0, 216, 255, 0.25)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(snappedPoint.x, snappedPoint.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(snappedPoint.x - 9, snappedPoint.y);
+      ctx.lineTo(snappedPoint.x + 9, snappedPoint.y);
+      ctx.moveTo(snappedPoint.x, snappedPoint.y - 9);
+      ctx.lineTo(snappedPoint.x, snappedPoint.y + 9);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }, [
+    drawings,
+    selectedDrawingId,
+    inFlightDrawing,
+    isDrawingsHidden,
+    snappedPoint,
+    isMagnetActive,
+    isDrawing,
+    drawingStep,
+    activeDrawingTool,
+    getSafeScreenX,
+    getSafeScreenY,
+    renderTrendline,
+    renderFibonacci,
+    renderPosition,
+    renderRuler,
+    renderBrush,
+    renderText,
+    renderHandles,
+  ]);
+
+  // Subscribe to Pan & Zoom events to re-project drawings seamlessly
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    const handleRangeChange = () => {
+      renderDrawingCanvas();
+    };
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleRangeChange);
+    chart.timeScale().subscribeVisibleTimeRangeChange(handleRangeChange);
+
+    return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleRangeChange);
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(handleRangeChange);
+    };
+  }, [renderDrawingCanvas]);
 
   useEffect(() => {
     renderDrawingCanvas();
   }, [renderDrawingCanvas]);
 
-  // Mouse handlers for drawing overlay
+  // Keyboard shortcut listener (Delete/Backspace to remove, Escape to cancel)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedDrawingId) {
+          const drawingToDelete = drawings.find((d) => d.id === selectedDrawingId);
+          if (drawingToDelete && !drawingToDelete.isLocked) {
+            saveDrawings(drawings.filter((d) => d.id !== selectedDrawingId));
+            setSelectedDrawingId(null);
+          }
+        }
+      } else if (e.key === "Escape") {
+        if (inFlightDrawing) {
+          setInFlightDrawing(null);
+          setDrawingStep(0);
+          setIsDrawing(false);
+          setDragStartPos(null);
+        } else if (selectedDrawingId) {
+          setSelectedDrawingId(null);
+        } else if (activeDrawingTool !== "none" && activeDrawingTool !== "crosshair") {
+          onSelectDrawingTool?.("none");
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    selectedDrawingId,
+    drawings,
+    inFlightDrawing,
+    activeDrawingTool,
+    onSelectDrawingTool,
+    saveDrawings,
+  ]);
+
+  // Mouse handlers for drawing overlay (DEC-042)
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeDrawingTool === "none" || activeDrawingTool === "crosshair") return;
     const rect = drawingCanvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setIsDrawing(true);
-    setDragStart({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    let effectiveTime =
+      coordinateToTime(x) ||
+      (barsRef.current.length > 0
+        ? barsRef.current[barsRef.current.length - 1].time
+        : Date.now());
+    let effectivePrice = coordinateToPrice(y) || currentPrice || 0;
+
+    if (isMagnetActive) {
+      const snap = findNearestCandlePoint(
+        x,
+        y,
+        barsRef.current,
+        timeToCoordinate,
+        priceToCoordinate,
+        25
+      );
+      if (snap) {
+        effectiveTime = snap.time;
+        effectivePrice = snap.price;
+      }
+    }
+
+    // 1. Tool placement workflow
+    if (activeDrawingTool !== "none" && activeDrawingTool !== "crosshair") {
+      if (drawingStep === 0) {
+        const newDrawing: ChartDrawing = {
+          id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          type: activeDrawingTool,
+          startTime: effectiveTime,
+          startPrice: effectivePrice,
+          endTime: effectiveTime,
+          endPrice: effectivePrice,
+          color: "#2962ff",
+          isLocked: isDrawingsLocked || false,
+        };
+        setInFlightDrawing(newDrawing);
+        setDrawingStep(1);
+        setIsDrawing(true);
+        setDragStartPos({
+          x,
+          y,
+          startTime: effectiveTime,
+          endTime: effectiveTime,
+          startPrice: effectivePrice,
+          endPrice: effectivePrice,
+        });
+      } else if (drawingStep === 1 && inFlightDrawing) {
+        const finished: ChartDrawing = {
+          ...inFlightDrawing,
+          endTime: effectiveTime,
+          endPrice: effectivePrice,
+        };
+        saveDrawings([...drawings, finished]);
+        setSelectedDrawingId(finished.id);
+        setInFlightDrawing(null);
+        setDrawingStep(0);
+        setIsDrawing(false);
+        setDragStartPos(null);
+        onSelectDrawingTool?.("none");
+      }
+      return;
+    }
+
+    // 2. Selection & handle dragging workflow
+    const hit = getHitTestResult(x, y);
+    if (hit) {
+      setSelectedDrawingId(hit.drawing.id);
+      if (!hit.drawing.isLocked && !isDrawingsLocked) {
+        setDraggedHandle(hit.handle);
+        setDragStartPos({
+          x,
+          y,
+          startTime: hit.drawing.startTime,
+          endTime: hit.drawing.endTime,
+          startPrice: hit.drawing.startPrice,
+          endPrice: hit.drawing.endPrice,
+        });
+      }
+    } else {
+      setSelectedDrawingId(null);
+      setDraggedHandle(null);
+      setDragStartPos(null);
+    }
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = drawingCanvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    setMousePos(pos);
-    if (isDrawing) renderDrawingCanvas();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    let effectiveTime =
+      coordinateToTime(x) ||
+      (barsRef.current.length > 0
+        ? barsRef.current[barsRef.current.length - 1].time
+        : Date.now());
+    let effectivePrice = coordinateToPrice(y) || currentPrice || 0;
+
+    if (isMagnetActive) {
+      const snap = findNearestCandlePoint(
+        x,
+        y,
+        barsRef.current,
+        timeToCoordinate,
+        priceToCoordinate,
+        25
+      );
+      if (snap) {
+        setSnappedPoint(snap);
+        effectiveTime = snap.time;
+        effectivePrice = snap.price;
+      } else {
+        setSnappedPoint(null);
+      }
+    } else {
+      setSnappedPoint(null);
+    }
+
+    if (drawingStep === 1 && inFlightDrawing) {
+      setInFlightDrawing((prev) =>
+        prev ? { ...prev, endTime: effectiveTime, endPrice: effectivePrice } : null
+      );
+      return;
+    }
+
+    if (draggedHandle && selectedDrawingId && dragStartPos) {
+      const drawing = drawings.find((d) => d.id === selectedDrawingId);
+      if (drawing && !drawing.isLocked && !isDrawingsLocked) {
+        if (draggedHandle === "start") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, startTime: effectiveTime, startPrice: effectivePrice }
+                : d
+            )
+          );
+        } else if (draggedHandle === "end") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, endTime: effectiveTime, endPrice: effectivePrice }
+                : d
+            )
+          );
+        } else if (draggedHandle === "body") {
+          const deltaPrice =
+            effectivePrice - (coordinateToPrice(dragStartPos.y) || dragStartPos.startPrice);
+          const startCoordTime = coordinateToTime(dragStartPos.x) || dragStartPos.startTime;
+          const deltaTime = effectiveTime - startCoordTime;
+
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? {
+                    ...d,
+                    startTime: dragStartPos.startTime + deltaTime,
+                    endTime: dragStartPos.endTime + deltaTime,
+                    startPrice: dragStartPos.startPrice + deltaPrice,
+                    endPrice: dragStartPos.endPrice + deltaPrice,
+                  }
+                : d
+            )
+          );
+        }
+      }
+      return;
+    }
+
+    const hit = getHitTestResult(x, y);
+    setIsHoveringDrawing(hit !== null);
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (isDrawing && dragStart) {
-      const rect = drawingCanvasRef.current?.getBoundingClientRect();
-      if (rect) {
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        setDrawnShapes((prev) => [
-          ...prev,
-          {
-            type: activeDrawingTool,
-            startX: dragStart.x,
-            startY: dragStart.y,
-            endX: x,
-            endY: y,
-            startPrice: 0,
-            endPrice: 0,
-          },
-        ]);
+    const rect = drawingCanvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    let effectiveTime =
+      coordinateToTime(x) ||
+      (barsRef.current.length > 0
+        ? barsRef.current[barsRef.current.length - 1].time
+        : Date.now());
+    let effectivePrice = coordinateToPrice(y) || currentPrice || 0;
+
+    if (isMagnetActive) {
+      const snap = findNearestCandlePoint(
+        x,
+        y,
+        barsRef.current,
+        timeToCoordinate,
+        priceToCoordinate,
+        25
+      );
+      if (snap) {
+        effectiveTime = snap.time;
+        effectivePrice = snap.price;
       }
     }
-    setIsDrawing(false);
-    setDragStart(null);
+
+    if (drawingStep === 1 && inFlightDrawing && dragStartPos) {
+      const dist = Math.hypot(x - dragStartPos.x, y - dragStartPos.y);
+      if (dist > 15) {
+        const finished: ChartDrawing = {
+          ...inFlightDrawing,
+          endTime: effectiveTime,
+          endPrice: effectivePrice,
+        };
+        saveDrawings([...drawings, finished]);
+        setSelectedDrawingId(finished.id);
+        setInFlightDrawing(null);
+        setDrawingStep(0);
+        setIsDrawing(false);
+        setDragStartPos(null);
+        onSelectDrawingTool?.("none");
+        return;
+      }
+    }
+
+    if (draggedHandle) {
+      setDraggedHandle(null);
+      setDragStartPos(null);
+    }
   };
 
   // Telemetry tape & Indicator HUD computations (DEC-034)
@@ -1041,6 +1903,40 @@ export function TradingViewContainer({
   const hasMacd =
     activeIndicators.includes("Zero-Lag MACD Histogram") ||
     activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
+
+  // Drawing overlay interaction state (DEC-042 & DEC-043)
+  const isDrawingMode = activeDrawingTool !== "none" && activeDrawingTool !== "crosshair";
+  const isInteracting =
+    isDrawingMode ||
+    isDrawing ||
+    drawingStep === 1 ||
+    draggedHandle !== null ||
+    selectedDrawingId !== null ||
+    isHoveringDrawing;
+
+  const canvasCursor = isDrawingMode
+    ? "crosshair"
+    : draggedHandle
+    ? "grabbing"
+    : isHoveringDrawing
+    ? "grab"
+    : "default";
+
+  const selectedDrawing = drawings.find((d) => d.id === selectedDrawingId);
+  let floatingToolbarPos: { x: number; y: number } | null = null;
+  if (selectedDrawing && !isDrawingsHidden) {
+    const x1 = getSafeScreenX(selectedDrawing.startTime);
+    const y1 = getSafeScreenY(selectedDrawing.startPrice);
+    const x2 = getSafeScreenX(selectedDrawing.endTime);
+    const y2 = getSafeScreenY(selectedDrawing.endPrice);
+    if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
+      const rect = drawingCanvasRef.current?.getBoundingClientRect();
+      const width = rect?.width || 800;
+      const top = Math.max(40, Math.min(y1, y2) - 40);
+      const left = Math.max(12, Math.min(width - 180, (x1 + x2) / 2 - 80));
+      floatingToolbarPos = { x: left, y: top };
+    }
+  }
 
   return (
     <div
@@ -1159,7 +2055,19 @@ export function TradingViewContainer({
       </div>
 
       {/* Main Chart Workspace Area */}
-      <div className="flex-1 relative w-full h-full">
+      <div
+        className="flex-1 relative w-full h-full"
+        onMouseMove={(e) => {
+          if (activeDrawingTool !== "none" && activeDrawingTool !== "crosshair") return;
+          if (isDrawing || drawingStep === 1 || draggedHandle) return;
+          const rect = drawingCanvasRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          const hit = getHitTestResult(x, y);
+          setIsHoveringDrawing(hit !== null);
+        }}
+      >
         {hasLibrary ? (
           <div id="tv_chart_container" className="w-full h-full" />
         ) : (
@@ -1170,28 +2078,105 @@ export function TradingViewContainer({
               className="w-full h-full absolute inset-0 cursor-crosshair"
             />
 
-            {/* Interactive Drawing Overlay Canvas */}
+            {/* Interactive Drawing Overlay Canvas (DEC-040 & DEC-042) */}
             <canvas
               ref={drawingCanvasRef}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={() => {
-                setMousePos(null);
+                setSnappedPoint(null);
+                setIsHoveringDrawing(false);
+                if (draggedHandle) {
+                  setDraggedHandle(null);
+                  setDragStartPos(null);
+                }
                 renderDrawingCanvas();
               }}
               className="w-full h-full absolute inset-0 z-10"
               style={{
-                pointerEvents:
-                  activeDrawingTool !== "none" && activeDrawingTool !== "crosshair"
-                    ? "auto"
-                    : "none",
-                cursor:
-                  activeDrawingTool !== "none" && activeDrawingTool !== "crosshair"
-                    ? "crosshair"
-                    : "default",
+                pointerEvents: isInteracting ? "auto" : "none",
+                cursor: canvasCursor,
               }}
             />
+
+            {/* Floating Action Pill for Selected Drawing (DEC-043) */}
+            {selectedDrawing && floatingToolbarPos && !isDrawingsHidden && (
+              <div
+                style={{ top: floatingToolbarPos.y, left: floatingToolbarPos.x }}
+                className="absolute z-30 flex items-center gap-1.5 bg-surface-container-lowest/95 border border-border px-2 py-1 rounded-md shadow-xl backdrop-blur-md text-xs font-mono"
+              >
+                {/* Color cycle button */}
+                <button
+                  onClick={() => {
+                    const nextColor =
+                      DRAWING_COLORS[
+                        (DRAWING_COLORS.indexOf(selectedDrawing.color || "#2962ff") + 1) %
+                          DRAWING_COLORS.length
+                      ];
+                    saveDrawings(
+                      drawings.map((d) =>
+                        d.id === selectedDrawing.id ? { ...d, color: nextColor } : d
+                      )
+                    );
+                  }}
+                  className="flex items-center gap-1 p-1 hover:bg-surface rounded text-muted hover:text-on-surface cursor-pointer"
+                  title="Cycle Color"
+                >
+                  <span
+                    className="w-3 h-3 rounded-full border border-border"
+                    style={{ backgroundColor: selectedDrawing.color || "#2962ff" }}
+                  />
+                </button>
+
+                {/* Lock / Unlock button */}
+                <button
+                  onClick={() => {
+                    saveDrawings(
+                      drawings.map((d) =>
+                        d.id === selectedDrawing.id ? { ...d, isLocked: !d.isLocked } : d
+                      )
+                    );
+                  }}
+                  className={`p-1 rounded cursor-pointer transition-colors ${
+                    selectedDrawing.isLocked
+                      ? "text-gold bg-gold/10"
+                      : "text-muted hover:text-on-surface hover:bg-surface"
+                  }`}
+                  title={selectedDrawing.isLocked ? "Unlock Drawing" : "Lock Drawing"}
+                >
+                  {selectedDrawing.isLocked ? <Lock size={13} /> : <Unlock size={13} />}
+                </button>
+
+                {/* Delete button */}
+                <button
+                  onClick={() => {
+                    if (!selectedDrawing.isLocked) {
+                      saveDrawings(drawings.filter((d) => d.id !== selectedDrawing.id));
+                      setSelectedDrawingId(null);
+                    }
+                  }}
+                  className={`p-1 rounded cursor-pointer transition-colors ${
+                    selectedDrawing.isLocked
+                      ? "opacity-30 cursor-not-allowed"
+                      : "text-muted hover:text-tertiary hover:bg-tertiary/10"
+                  }`}
+                  title="Delete Drawing (Del)"
+                  disabled={selectedDrawing.isLocked}
+                >
+                  <Trash2 size={13} />
+                </button>
+
+                {/* Deselect button */}
+                <button
+                  onClick={() => setSelectedDrawingId(null)}
+                  className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                  title="Deselect"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
 
             {/* Floating In-Pane Header Badges (DEC-038) */}
             <div className="absolute top-2 left-2 z-20 flex flex-col gap-1.5 pointer-events-none">

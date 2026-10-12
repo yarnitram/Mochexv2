@@ -30,17 +30,37 @@ export type DrawingToolType =
 interface DrawingRailProps {
   activeTool: DrawingToolType;
   onSelectTool: (tool: DrawingToolType) => void;
+  isMagnetActive?: boolean;
+  onToggleMagnet?: () => void;
+  isLocked?: boolean;
+  onToggleLock?: () => void;
+  isHidden?: boolean;
+  onToggleHide?: () => void;
   onClearAll?: () => void;
 }
 
 export function DrawingRail({
   activeTool,
   onSelectTool,
+  isMagnetActive: controlledMagnet,
+  onToggleMagnet,
+  isLocked: controlledLocked,
+  onToggleLock,
+  isHidden: controlledHidden,
+  onToggleHide,
   onClearAll,
 }: DrawingRailProps) {
-  const [isLocked, setIsLocked] = useState(false);
-  const [isHidden, setIsHidden] = useState(false);
-  const [isMagnetActive, setIsMagnetActive] = useState(true);
+  const [localLocked, setLocalLocked] = useState(false);
+  const [localHidden, setLocalHidden] = useState(false);
+  const [localMagnet, setLocalMagnet] = useState(true);
+
+  const isLocked = controlledLocked !== undefined ? controlledLocked : localLocked;
+  const isHidden = controlledHidden !== undefined ? controlledHidden : localHidden;
+  const isMagnetActive = controlledMagnet !== undefined ? controlledMagnet : localMagnet;
+
+  const handleToggleMagnet = onToggleMagnet || (() => setLocalMagnet(!localMagnet));
+  const handleToggleLock = onToggleLock || (() => setLocalLocked(!localLocked));
+  const handleToggleHide = onToggleHide || (() => setLocalHidden(!localHidden));
 
   const tools: Array<{ id: DrawingToolType; label: string; icon: React.ReactNode }> = [
     { id: "crosshair", label: "Crosshair (C)", icon: <Crosshair size={16} /> },
@@ -79,7 +99,7 @@ export function DrawingRail({
       <div className="flex flex-col items-center gap-1 w-full px-1.5 border-t border-border pt-2">
         {/* Magnet Mode */}
         <button
-          onClick={() => setIsMagnetActive(!isMagnetActive)}
+          onClick={handleToggleMagnet}
           title={`Magnet Mode: ${isMagnetActive ? "ON (Snaps to OHLC)" : "OFF"}`}
           className={`w-9 h-9 rounded flex items-center justify-center transition-colors ${
             isMagnetActive
@@ -92,7 +112,7 @@ export function DrawingRail({
 
         {/* Lock Drawings */}
         <button
-          onClick={() => setIsLocked(!isLocked)}
+          onClick={handleToggleLock}
           title={isLocked ? "Unlock All Drawings" : "Lock All Drawings"}
           className={`w-9 h-9 rounded flex items-center justify-center transition-colors ${
             isLocked
@@ -105,7 +125,7 @@ export function DrawingRail({
 
         {/* Hide Drawings */}
         <button
-          onClick={() => setIsHidden(!isHidden)}
+          onClick={handleToggleHide}
           title={isHidden ? "Unhide Drawings" : "Hide Drawings"}
           className={`w-9 h-9 rounded flex items-center justify-center transition-colors ${
             isHidden
