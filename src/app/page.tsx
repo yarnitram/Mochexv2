@@ -216,6 +216,7 @@ export default function WorkstationPage() {
               resolution={resolution}
               activeDrawingTool={activeDrawingTool}
               activeIndicators={activeIndicators}
+              onToggleIndicator={handleApplyIndicator}
               trades={strategyResult?.trades || []}
               onBarsLoaded={handleBarsLoaded}
               onPriceUpdate={handlePriceUpdate}

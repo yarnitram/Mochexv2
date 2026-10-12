@@ -7,7 +7,7 @@ import { mexcWsManager } from "@/lib/mexc/websocket";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestTrade } from "@/lib/strategy/types";
 import {
@@ -36,6 +36,8 @@ import {
   buildTradeMarkers,
   mergeAndDeduplicateBars,
   buildBollingerBandsData,
+  buildRsiData,
+  buildMacdData,
 } from "@/lib/chart/lightweight-adapter";
 
 interface TradingViewContainerProps {
@@ -43,6 +45,7 @@ interface TradingViewContainerProps {
   resolution: string;
   activeDrawingTool?: DrawingToolType;
   activeIndicators?: string[];
+  onToggleIndicator?: (name: string) => void;
   trades?: BacktestTrade[];
   onBarsLoaded?: (bars: CandlestickBar[]) => void;
   onPriceUpdate?: (stats: {
@@ -81,6 +84,10 @@ interface HoveredStats {
   bbUpper?: number;
   bbMiddle?: number;
   bbLower?: number;
+  rsi?: number;
+  macd?: number;
+  macdSignal?: number;
+  macdHist?: number;
 }
 
 export function TradingViewContainer({
@@ -88,6 +95,7 @@ export function TradingViewContainer({
   resolution,
   activeDrawingTool = "none",
   activeIndicators = ["EMA Ribbon Momentum Multi-Timeframe"],
+  onToggleIndicator,
   trades = [],
   onBarsLoaded,
   onPriceUpdate,
@@ -105,7 +113,23 @@ export function TradingViewContainer({
   const bbUpperSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bbMiddleSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bbLowerSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdLineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdSignalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdHistSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+
+  // Sub-pane configurable parameters (DEC-037 & DEC-038)
+  const [rsiPeriod, setRsiPeriod] = useState(14);
+  const [rsiOverbought, setRsiOverbought] = useState(70);
+  const [rsiOversold, setRsiOversold] = useState(30);
+
+  const [macdFast, setMacdFast] = useState(12);
+  const [macdSlow, setMacdSlow] = useState(26);
+  const [macdSignal, setMacdSignal] = useState(9);
+
+  // Quick settings tuning modal state
+  const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | null>(null);
 
   // Synchronous state refs for callbacks
   const barsRef = useRef<CandlestickBar[]>([]);
@@ -157,6 +181,11 @@ export function TradingViewContainer({
         textColor: "#8d90a2",
         fontSize: 11,
         fontFamily: "'JetBrains Mono', monospace",
+        panes: {
+          enableResize: true,
+          separatorColor: "#17202b",
+          separatorHoverColor: "#2962ff",
+        },
       },
       grid: {
         vertLines: { color: "#131c27" },
@@ -288,6 +317,18 @@ export function TradingViewContainer({
       const bbUpperData = param.seriesData.get(bbUpperSeries) as LineData<Time> | undefined;
       const bbMiddleData = param.seriesData.get(bbMiddleSeries) as LineData<Time> | undefined;
       const bbLowerData = param.seriesData.get(bbLowerSeries) as LineData<Time> | undefined;
+      const rsiData = rsiSeriesRef.current
+        ? (param.seriesData.get(rsiSeriesRef.current) as LineData<Time> | undefined)
+        : undefined;
+      const macdLineData = macdLineSeriesRef.current
+        ? (param.seriesData.get(macdLineSeriesRef.current) as LineData<Time> | undefined)
+        : undefined;
+      const macdSigData = macdSignalSeriesRef.current
+        ? (param.seriesData.get(macdSignalSeriesRef.current) as LineData<Time> | undefined)
+        : undefined;
+      const macdHistData = macdHistSeriesRef.current
+        ? (param.seriesData.get(macdHistSeriesRef.current) as HistogramData<Time> | undefined)
+        : undefined;
 
       if (candleData && "open" in candleData) {
         setHoveredStats({
@@ -301,6 +342,10 @@ export function TradingViewContainer({
           bbUpper: bbUpperData?.value,
           bbMiddle: bbMiddleData?.value,
           bbLower: bbLowerData?.value,
+          rsi: rsiData?.value,
+          macd: macdLineData?.value,
+          macdSignal: macdSigData?.value,
+          macdHist: macdHistData?.value,
         });
       } else {
         setHoveredStats(null);
@@ -353,6 +398,16 @@ export function TradingViewContainer({
             bbMiddleSeries.setData(bbData.middle);
             bbLowerSeries.setData(bbData.lower);
 
+            if (rsiSeriesRef.current) {
+              rsiSeriesRef.current.setData(buildRsiData(merged, rsiPeriod));
+            }
+            if (macdLineSeriesRef.current && macdSignalSeriesRef.current && macdHistSeriesRef.current) {
+              const macdData = buildMacdData(merged, macdFast, macdSlow, macdSignal);
+              macdLineSeriesRef.current.setData(macdData.macd);
+              macdSignalSeriesRef.current.setData(macdData.signal);
+              macdHistSeriesRef.current.setData(macdData.histogram);
+            }
+
             // Maintain viewport offset seamlessly without jump
             const curRange = chart.timeScale().getVisibleLogicalRange();
             if (curRange) {
@@ -396,6 +451,10 @@ export function TradingViewContainer({
       bbUpperSeriesRef.current = null;
       bbMiddleSeriesRef.current = null;
       bbLowerSeriesRef.current = null;
+      rsiSeriesRef.current = null;
+      macdLineSeriesRef.current = null;
+      macdSignalSeriesRef.current = null;
+      macdHistSeriesRef.current = null;
       markersPluginRef.current = null;
     };
   }, [hasLibrary]);
@@ -437,6 +496,16 @@ export function TradingViewContainer({
             bbUpperSeriesRef.current?.setData(bbData.upper);
             bbMiddleSeriesRef.current?.setData(bbData.middle);
             bbLowerSeriesRef.current?.setData(bbData.lower);
+
+            if (rsiSeriesRef.current) {
+              rsiSeriesRef.current.setData(buildRsiData(sorted, rsiPeriod));
+            }
+            if (macdLineSeriesRef.current && macdSignalSeriesRef.current && macdHistSeriesRef.current) {
+              const macdData = buildMacdData(sorted, macdFast, macdSlow, macdSignal);
+              macdLineSeriesRef.current.setData(macdData.macd);
+              macdSignalSeriesRef.current.setData(macdData.signal);
+              macdHistSeriesRef.current.setData(macdData.histogram);
+            }
             chartRef.current?.timeScale().scrollToRealTime();
             setTimeout(() => {
               isInitialLoadDone.current = true;
@@ -546,6 +615,43 @@ export function TradingViewContainer({
             ema50SeriesRef.current?.update({ time: barTime, value: latestEma50 });
           }
         }
+
+        // Update latest RSI point
+        if (closes.length >= rsiPeriod + 1 && rsiSeriesRef.current) {
+          const rsiList = ta.rsi(closes, rsiPeriod);
+          const lastRsi = rsiList[rsiList.length - 1];
+          if (!isNaN(lastRsi)) {
+            rsiSeriesRef.current.update({ time: barTime, value: lastRsi });
+          }
+        }
+
+        // Update latest MACD point
+        if (
+          closes.length >= macdSlow + macdSignal &&
+          macdLineSeriesRef.current &&
+          macdSignalSeriesRef.current &&
+          macdHistSeriesRef.current
+        ) {
+          const macdList = ta.macd(closes, macdFast, macdSlow, macdSignal);
+          const lastMacd = macdList[macdList.length - 1];
+          if (
+            lastMacd &&
+            lastMacd.macd !== undefined &&
+            lastMacd.signal !== undefined &&
+            lastMacd.histogram !== undefined
+          ) {
+            macdLineSeriesRef.current.update({ time: barTime, value: lastMacd.macd });
+            macdSignalSeriesRef.current.update({ time: barTime, value: lastMacd.signal });
+            macdHistSeriesRef.current.update({
+              time: barTime,
+              value: lastMacd.histogram,
+              color:
+                lastMacd.histogram >= 0
+                  ? "rgba(0, 192, 135, 0.65)"
+                  : "rgba(255, 59, 48, 0.65)",
+            });
+          }
+        }
       }
     });
 
@@ -570,6 +676,16 @@ export function TradingViewContainer({
           bbUpperSeriesRef.current?.setData(bbData.upper);
           bbMiddleSeriesRef.current?.setData(bbData.middle);
           bbLowerSeriesRef.current?.setData(bbData.lower);
+
+          if (rsiSeriesRef.current) {
+            rsiSeriesRef.current.setData(buildRsiData(visibleBars, rsiPeriod));
+          }
+          if (macdLineSeriesRef.current && macdSignalSeriesRef.current && macdHistSeriesRef.current) {
+            const macdData = buildMacdData(visibleBars, macdFast, macdSlow, macdSignal);
+            macdLineSeriesRef.current.setData(macdData.macd);
+            macdSignalSeriesRef.current.setData(macdData.signal);
+            macdHistSeriesRef.current.setData(macdData.histogram);
+          }
         }
       },
     });
@@ -588,8 +704,12 @@ export function TradingViewContainer({
     markersPluginRef.current.setMarkers(markers);
   }, [trades, bars]);
 
-  // 5. Indicator Visibility Management
+  // 5. Indicator & Sub-Pane Lifecycle Management (DEC-035 to DEC-039)
   useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    // 5.1 Main Pane 0 Overlays (EMA & Bollinger)
     const hasRibbonOrEma =
       activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
       activeIndicators.some((ind) => ind.toLowerCase().includes("ema"));
@@ -603,7 +723,173 @@ export function TradingViewContainer({
     bbUpperSeriesRef.current?.applyOptions({ visible: hasBollinger });
     bbMiddleSeriesRef.current?.applyOptions({ visible: hasBollinger });
     bbLowerSeriesRef.current?.applyOptions({ visible: hasBollinger });
-  }, [activeIndicators]);
+
+    // 5.2 Dynamic Sub-Pane Allocations
+    const hasRsi =
+      activeIndicators.includes("RSI Divergence Engine Pro") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
+
+    const hasMacd =
+      activeIndicators.includes("Zero-Lag MACD Histogram") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
+
+    // Tear down any existing sub-pane series to ensure deterministic pane order & clean disposal
+    if (rsiSeriesRef.current) {
+      try {
+        chart.removeSeries(rsiSeriesRef.current);
+      } catch {}
+      rsiSeriesRef.current = null;
+    }
+    if (macdLineSeriesRef.current) {
+      try {
+        chart.removeSeries(macdLineSeriesRef.current);
+      } catch {}
+      macdLineSeriesRef.current = null;
+    }
+    if (macdSignalSeriesRef.current) {
+      try {
+        chart.removeSeries(macdSignalSeriesRef.current);
+      } catch {}
+      macdSignalSeriesRef.current = null;
+    }
+    if (macdHistSeriesRef.current) {
+      try {
+        chart.removeSeries(macdHistSeriesRef.current);
+      } catch {}
+      macdHistSeriesRef.current = null;
+    }
+
+    let nextPaneIndex = 1;
+
+    // Allocate RSI Sub-Pane
+    if (hasRsi) {
+      const rsiPaneIndex = nextPaneIndex++;
+      const rsiSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: "#9353d3",
+          lineWidth: 2,
+          priceScaleId: "right",
+          title: `RSI ${rsiPeriod}`,
+          autoscaleInfoProvider: () => ({
+            priceRange: {
+              minValue: 0,
+              maxValue: 100,
+            },
+          }),
+        },
+        rsiPaneIndex
+      );
+
+      rsiSeries.createPriceLine({
+        price: rsiOverbought,
+        color: "rgba(255, 59, 48, 0.45)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `${rsiOverbought}`,
+      });
+      rsiSeries.createPriceLine({
+        price: 50,
+        color: "rgba(67, 70, 86, 0.6)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+      });
+      rsiSeries.createPriceLine({
+        price: rsiOversold,
+        color: "rgba(0, 192, 135, 0.45)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `${rsiOversold}`,
+      });
+
+      rsiSeriesRef.current = rsiSeries;
+
+      // Populate current data
+      if (barsRef.current.length > 0) {
+        rsiSeries.setData(buildRsiData(barsRef.current, rsiPeriod));
+      }
+
+      // Configure fixed 130px height
+      const panes = chart.panes();
+      if (panes[rsiPaneIndex]) {
+        panes[rsiPaneIndex].setHeight(130);
+      }
+    }
+
+    // Allocate MACD Sub-Pane
+    if (hasMacd) {
+      const macdPaneIndex = nextPaneIndex++;
+
+      const macdHistSeries = chart.addSeries(
+        HistogramSeries,
+        {
+          priceScaleId: "right",
+          title: "Histogram",
+        },
+        macdPaneIndex
+      );
+
+      const macdLineSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: "#2962ff",
+          lineWidth: 2,
+          priceScaleId: "right",
+          title: "MACD",
+        },
+        macdPaneIndex
+      );
+
+      const macdSignalSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: "#f5ac37",
+          lineWidth: 1,
+          priceScaleId: "right",
+          title: "Signal",
+        },
+        macdPaneIndex
+      );
+
+      macdLineSeries.createPriceLine({
+        price: 0,
+        color: "rgba(67, 70, 86, 0.6)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: "0",
+      });
+
+      macdHistSeriesRef.current = macdHistSeries;
+      macdLineSeriesRef.current = macdLineSeries;
+      macdSignalSeriesRef.current = macdSignalSeries;
+
+      // Populate current data
+      if (barsRef.current.length > 0) {
+        const macdData = buildMacdData(barsRef.current, macdFast, macdSlow, macdSignal);
+        macdHistSeries.setData(macdData.histogram);
+        macdLineSeries.setData(macdData.macd);
+        macdSignalSeries.setData(macdData.signal);
+      }
+
+      // Configure fixed 130px height
+      const panes = chart.panes();
+      if (panes[macdPaneIndex]) {
+        panes[macdPaneIndex].setHeight(130);
+      }
+    }
+  }, [
+    activeIndicators,
+    rsiPeriod,
+    rsiOverbought,
+    rsiOversold,
+    macdFast,
+    macdSlow,
+    macdSignal,
+  ]);
 
   // 6. User Drawing Overlay Canvas
   useEffect(() => {
@@ -708,9 +994,17 @@ export function TradingViewContainer({
   const ema20Vals = closes.length >= 20 ? ta.ema(closes, 20) : [];
   const ema50Vals = closes.length >= 50 ? ta.ema(closes, 50) : [];
   const bbVals = closes.length >= 20 ? ta.bollingerbands(closes, 20, 2) : [];
+  const rsiVals = closes.length >= rsiPeriod + 1 ? ta.rsi(closes, rsiPeriod) : [];
+  const macdResults =
+    closes.length >= macdSlow + macdSignal
+      ? ta.macd(closes, macdFast, macdSlow, macdSignal)
+      : [];
+
   const latestEma20 = ema20Vals.length > 0 ? ema20Vals[ema20Vals.length - 1] : null;
   const latestEma50 = ema50Vals.length > 0 ? ema50Vals[ema50Vals.length - 1] : null;
   const latestBb = bbVals.length > 0 ? bbVals[bbVals.length - 1] : null;
+  const latestRsi = rsiVals.length > 0 ? rsiVals[rsiVals.length - 1] : null;
+  const latestMacdObj = macdResults.length > 0 ? macdResults[macdResults.length - 1] : null;
 
   const displayBar = hoveredStats
     ? {
@@ -726,6 +1020,10 @@ export function TradingViewContainer({
   const displayBbUpper = hoveredStats?.bbUpper ?? latestBb?.upper;
   const displayBbMiddle = hoveredStats?.bbMiddle ?? latestBb?.middle;
   const displayBbLower = hoveredStats?.bbLower ?? latestBb?.lower;
+  const displayRsi = hoveredStats?.rsi ?? latestRsi;
+  const displayMacd = hoveredStats?.macd ?? latestMacdObj?.macd;
+  const displayMacdSignal = hoveredStats?.macdSignal ?? latestMacdObj?.signal;
+  const displayMacdHist = hoveredStats?.macdHist ?? latestMacdObj?.histogram;
   const displayVol = hoveredStats?.volume ?? lastBar?.volume;
 
   const hasRibbonOrEma =
@@ -735,6 +1033,14 @@ export function TradingViewContainer({
   const hasBollinger =
     activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
     activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
+
+  const hasRsi =
+    activeIndicators.includes("RSI Divergence Engine Pro") ||
+    activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
+
+  const hasMacd =
+    activeIndicators.includes("Zero-Lag MACD Histogram") ||
+    activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
 
   return (
     <div
@@ -886,6 +1192,211 @@ export function TradingViewContainer({
                     : "default",
               }}
             />
+
+            {/* Floating In-Pane Header Badges (DEC-038) */}
+            <div className="absolute top-2 left-2 z-20 flex flex-col gap-1.5 pointer-events-none">
+              {hasRsi && (
+                <div className="pointer-events-auto flex items-center gap-2 bg-surface-container-lowest/90 border border-border px-2.5 py-1 rounded text-[11px] font-mono shadow-sm backdrop-blur-xs">
+                  <span className="w-2 h-2 rounded-full bg-[#9353d3]" />
+                  <span className="font-semibold text-on-surface">RSI ({rsiPeriod})</span>
+                  <span className="text-[#9353d3] font-semibold">
+                    {displayRsi !== null && displayRsi !== undefined ? displayRsi.toFixed(2) : "—"}
+                  </span>
+                  <div className="flex items-center gap-1 pl-1.5 border-l border-border text-muted">
+                    <button
+                      onClick={() =>
+                        setActiveSettingsModal(
+                          activeSettingsModal === "rsi" ? null : "rsi"
+                        )
+                      }
+                      className="hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                      title="Configure RSI"
+                    >
+                      <Settings size={12} />
+                    </button>
+                    {onToggleIndicator && (
+                      <button
+                        onClick={() => onToggleIndicator("RSI Divergence Engine Pro")}
+                        className="hover:text-tertiary transition-colors p-0.5 rounded cursor-pointer"
+                        title="Remove RSI Pane"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {hasMacd && (
+                <div className="pointer-events-auto flex items-center gap-2 bg-surface-container-lowest/90 border border-border px-2.5 py-1 rounded text-[11px] font-mono shadow-sm backdrop-blur-xs">
+                  <span className="w-2 h-2 rounded-full bg-[#2962ff]" />
+                  <span className="font-semibold text-on-surface">
+                    MACD ({macdFast}, {macdSlow}, {macdSignal})
+                  </span>
+                  <span className="text-[#2962ff]">
+                    {displayMacd !== null && displayMacd !== undefined
+                      ? displayMacd.toFixed(2)
+                      : "—"}
+                  </span>
+                  <span className="text-gold">
+                    {displayMacdSignal !== null && displayMacdSignal !== undefined
+                      ? displayMacdSignal.toFixed(2)
+                      : "—"}
+                  </span>
+                  <span
+                    className={
+                      displayMacdHist !== null && displayMacdHist !== undefined
+                        ? displayMacdHist >= 0
+                          ? "text-secondary font-semibold"
+                          : "text-tertiary font-semibold"
+                        : "text-muted"
+                    }
+                  >
+                    {displayMacdHist !== null && displayMacdHist !== undefined
+                      ? displayMacdHist >= 0
+                        ? `+${displayMacdHist.toFixed(2)}`
+                        : displayMacdHist.toFixed(2)
+                      : "—"}
+                  </span>
+                  <div className="flex items-center gap-1 pl-1.5 border-l border-border text-muted">
+                    <button
+                      onClick={() =>
+                        setActiveSettingsModal(
+                          activeSettingsModal === "macd" ? null : "macd"
+                        )
+                      }
+                      className="hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                      title="Configure MACD"
+                    >
+                      <Settings size={12} />
+                    </button>
+                    {onToggleIndicator && (
+                      <button
+                        onClick={() => onToggleIndicator("Zero-Lag MACD Histogram")}
+                        className="hover:text-tertiary transition-colors p-0.5 rounded cursor-pointer"
+                        title="Remove MACD Pane"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Quick Parameter Tuning Modal (DEC-038) */}
+            {activeSettingsModal && (
+              <div className="absolute top-12 left-2 z-30 bg-surface-container-low border border-border p-3 rounded-lg shadow-xl font-mono text-xs w-64 backdrop-blur-md">
+                <div className="flex items-center justify-between pb-2 mb-2 border-b border-border">
+                  <span className="font-semibold text-on-surface uppercase">
+                    {activeSettingsModal === "rsi" ? "RSI Parameters" : "MACD Parameters"}
+                  </span>
+                  <button
+                    onClick={() => setActiveSettingsModal(null)}
+                    className="text-muted hover:text-on-surface p-0.5 cursor-pointer"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+
+                {activeSettingsModal === "rsi" && (
+                  <div className="flex flex-col gap-2">
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>RSI Period:</span>
+                      <input
+                        type="number"
+                        min="2"
+                        max="100"
+                        value={rsiPeriod}
+                        onChange={(e) =>
+                          setRsiPeriod(Math.max(2, parseInt(e.target.value) || 14))
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Overbought (70):</span>
+                      <input
+                        type="number"
+                        min="50"
+                        max="95"
+                        value={rsiOverbought}
+                        onChange={(e) =>
+                          setRsiOverbought(parseInt(e.target.value) || 70)
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Oversold (30):</span>
+                      <input
+                        type="number"
+                        min="5"
+                        max="50"
+                        value={rsiOversold}
+                        onChange={(e) =>
+                          setRsiOversold(parseInt(e.target.value) || 30)
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {activeSettingsModal === "macd" && (
+                  <div className="flex flex-col gap-2">
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Fast Length:</span>
+                      <input
+                        type="number"
+                        min="2"
+                        max="50"
+                        value={macdFast}
+                        onChange={(e) =>
+                          setMacdFast(Math.max(2, parseInt(e.target.value) || 12))
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Slow Length:</span>
+                      <input
+                        type="number"
+                        min="5"
+                        max="100"
+                        value={macdSlow}
+                        onChange={(e) =>
+                          setMacdSlow(Math.max(5, parseInt(e.target.value) || 26))
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Signal Smoothing:</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="50"
+                        value={macdSignal}
+                        onChange={(e) =>
+                          setMacdSignal(Math.max(1, parseInt(e.target.value) || 9))
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <div className="mt-3 pt-2 border-t border-border flex justify-end">
+                  <button
+                    onClick={() => setActiveSettingsModal(null)}
+                    className="px-2.5 py-1 rounded bg-primary text-on-primary font-semibold text-[11px] hover:bg-primary-hover cursor-pointer"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Proprietary Advanced Library Drop-In Ready Indicator */}
             <div className="absolute bottom-2 left-2 z-20 hidden sm:flex items-center gap-2 bg-surface-container-lowest/90 border border-border px-2.5 py-1 rounded text-[10px] text-muted font-mono backdrop-blur-xs">
