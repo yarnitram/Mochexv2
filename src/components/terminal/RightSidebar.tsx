@@ -58,6 +58,11 @@ import {
 } from "@/lib/trading/paper-trading-engine";
 import { getIntrabarPricePath } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
+import {
+  SIDEBAR_DEFAULT_WIDTH,
+  clampSidebarWidth,
+  computeSidebarWidthFromDrag,
+} from "@/lib/ui/resizable-layout";
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -104,6 +109,54 @@ export function RightSidebar({
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddPairOpen, setIsAddPairOpen] = useState(false);
   const [isListDropdownOpen, setIsListDropdownOpen] = useState(false);
+
+  // Horizontal Resizable Width State (260px - 560px, default 320px, DEC-077)
+  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const saved = localStorage.getItem("mochex:sidebar_width");
+      if (saved) {
+        setSidebarWidth(clampSidebarWidth(Number(saved)));
+      }
+    } catch {}
+  }, []);
+
+  const persistSidebarWidth = useCallback((w: number) => {
+    const clamped = clampSidebarWidth(w);
+    setSidebarWidth(clamped);
+    try {
+      localStorage.setItem("mochex:sidebar_width", String(clamped));
+    } catch {}
+  }, []);
+
+  const handleStartSidebarResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = sidebarWidth;
+      setIsResizingSidebar(true);
+
+      const handleMove = (moveEvent: MouseEvent) => {
+        const nextW = computeSidebarWidthFromDrag(startWidth, startX, moveEvent.clientX);
+        setSidebarWidth(nextW);
+      };
+
+      const handleUp = (upEvent: MouseEvent) => {
+        const finalW = computeSidebarWidthFromDrag(startWidth, startX, upEvent.clientX);
+        persistSidebarWidth(finalW);
+        setIsResizingSidebar(false);
+        window.removeEventListener("mousemove", handleMove);
+        window.removeEventListener("mouseup", handleUp);
+      };
+
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
+    },
+    [sidebarWidth, persistSidebarWidth]
+  );
 
   // Paper Trading & Order Execution State (DEC-072)
   const [paperAccount, setPaperAccount] = useState<PaperAccountState>(() =>
@@ -690,7 +743,26 @@ export function RightSidebar({
   const openTradeCount = paperAccount.positions.length + paperAccount.orders.length;
 
   return (
-    <aside className="w-80 bg-surface-container-lowest border-l border-border flex flex-col h-full select-none shrink-0 z-20 relative">
+    <aside
+      style={{ width: `${sidebarWidth}px` }}
+      className="bg-surface-container-lowest border-l border-border flex flex-col h-full select-none shrink-0 z-20 relative"
+    >
+      {/* Left-Edge Horizontal Resize Handle (260px - 560px, double-click to reset to 320px, DEC-077) */}
+      <div
+        onMouseDown={handleStartSidebarResize}
+        onDoubleClick={() => persistSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+        title="Drag to resize sidebar (260px–560px) · Double-click to reset to 320px"
+        className={`absolute -left-1 top-0 bottom-0 w-2 z-30 cursor-col-resize group flex items-center justify-center transition-colors ${
+          isResizingSidebar ? "bg-[#2962ff]/40" : "hover:bg-[#2962ff]/25"
+        }`}
+      >
+        <div
+          className={`w-[2px] h-10 rounded-full transition-colors ${
+            isResizingSidebar ? "bg-[#2962ff]" : "bg-transparent group-hover:bg-[#2962ff]"
+          }`}
+        />
+      </div>
+
       {/* Floating Alert Triggered Toast Banner (DEC-069) */}
       {activeToast && (
         <div className="fixed top-14 right-6 z-50 w-80 bg-surface-container-high border-2 border-gold rounded-lg shadow-2xl p-3 font-mono text-xs animate-in fade-in slide-in-from-top-2">

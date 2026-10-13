@@ -12,6 +12,7 @@ import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
 import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
 import { calculateVisibleVolumeProfile } from "@/lib/indicators/volume-profile";
+import { matchChartShortcut, isTypingTarget } from "@/lib/ui/keyboard-shortcuts";
 import {
   PaperAccountState,
   createInitialPaperAccount,
@@ -80,6 +81,8 @@ import {
 interface TradingViewContainerProps {
   paneId?: string;
   syncCrosshair?: boolean;
+  /** When false (non-focused split pane), Alt+ chart shortcuts are ignored (DEC-077). */
+  isActivePane?: boolean;
   symbol: string;
   resolution: string;
   activeDrawingTool?: DrawingToolType;
@@ -137,6 +140,7 @@ interface HoveredStats {
 export function TradingViewContainer({
   paneId = "pane-0",
   syncCrosshair = true,
+  isActivePane = true,
   symbol,
   resolution,
   activeDrawingTool = "none",
@@ -204,6 +208,11 @@ export function TradingViewContainer({
   syncCrosshairRef.current = syncCrosshair;
   const paneIdRef = useRef(paneId);
   paneIdRef.current = paneId;
+
+  // Keyboard shortcut support (DEC-077)
+  const lastHoverPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [isPriceScaleInverted, setIsPriceScaleInverted] = useState(false);
+  const [shortcutToast, setShortcutToast] = useState<string | null>(null);
 
   // Quick settings tuning modal state
   const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | "vpvr" | null>(null);
@@ -423,6 +432,7 @@ export function TradingViewContainer({
 
     // 2.5 Crosshair Hover Telemetry Synchronization (DEC-034, DEC-074 & DEC-075)
     chart.subscribeCrosshairMove((param) => {
+      lastHoverPointRef.current = param.point ? { x: param.point.x, y: param.point.y } : null;
       if (!param.time || !param.point) {
         setHoveredStats(null);
         if (syncCrosshairRef.current && typeof window !== "undefined") {
@@ -3884,10 +3894,8 @@ export function TradingViewContainer({
   // Keyboard shortcut listener (Delete/Backspace to remove, Enter to finish path, Escape to cancel)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        document.activeElement instanceof HTMLInputElement ||
-        document.activeElement instanceof HTMLTextAreaElement
-      ) {
+      if (!isActivePane) return;
+      if (isTypingTarget(document.activeElement)) {
         return;
       }
 
@@ -3990,6 +3998,135 @@ export function TradingViewContainer({
     saveDrawings,
     handleUndo,
     handleRedo,
+    isActivePane,
+  ]);
+
+  // TradingView Alt-Shortcut Suite (DEC-077) — focused pane only, ignored while typing
+  useEffect(() => {
+    if (!isActivePane) return;
+
+    const flashToast = (message: string) => {
+      setShortcutToast(message);
+      window.setTimeout(() => {
+        setShortcutToast((current) => (current === message ? null : current));
+      }, 1400);
+    };
+
+    // Price/time under the cursor, falling back to the latest candle close
+    const resolveCursorAnchor = (): { time: number; price: number } | null => {
+      const lastBar = barsRef.current[barsRef.current.length - 1];
+      const hover = lastHoverPointRef.current;
+      if (hover) {
+        const price = coordinateToPrice(hover.y);
+        const time = coordinateToTime(hover.x);
+        if (price !== null && time !== null) return { time, price };
+      }
+      if (lastBar) return { time: lastBar.time, price: lastBar.close };
+      return null;
+    };
+
+    const handleShortcut = (e: KeyboardEvent) => {
+      if (isTypingTarget(document.activeElement)) return;
+      const action = matchChartShortcut(e);
+      if (!action || action === "show_cheatsheet") return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const chart = chartRef.current;
+
+      switch (action) {
+        case "reset_view": {
+          if (!chart) return;
+          chart.priceScale("right").applyOptions({ autoScale: true });
+          chart.timeScale().resetTimeScale();
+          chart.timeScale().scrollToRealTime();
+          setActiveQuickRange(null);
+          flashToast("Chart view reset");
+          return;
+        }
+        case "invert_scale": {
+          if (!chart) return;
+          setIsPriceScaleInverted((prev) => {
+            const next = !prev;
+            chart.priceScale("right").applyOptions({ invertScale: next });
+            flashToast(next ? "Price scale inverted" : "Price scale normal");
+            return next;
+          });
+          return;
+        }
+        case "trendline": {
+          onSelectDrawingTool?.("trendline");
+          flashToast("Trendline tool");
+          return;
+        }
+        case "fibonacci": {
+          onSelectDrawingTool?.("fibonacci");
+          flashToast("Fib Retracement tool");
+          return;
+        }
+        case "horizontal_line": {
+          const anchor = resolveCursorAnchor();
+          if (!anchor) return;
+          const newDrawing: ChartDrawing = {
+            id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: "horizontal_line",
+            startTime: anchor.time,
+            startPrice: anchor.price,
+            endTime: anchor.time + 86400000,
+            endPrice: anchor.price,
+            color: "#2962ff",
+            lineWidth: 1.5,
+            lineStyle: "solid",
+            isLocked: isDrawingsLocked || false,
+          };
+          saveDrawings([...drawingsRef.current, newDrawing]);
+          setSelectedDrawingId(newDrawing.id);
+          flashToast(`Horizontal line @ ${anchor.price.toFixed(anchor.price >= 1 ? 2 : 6)}`);
+          return;
+        }
+        case "create_alert": {
+          // Selected drawing -> alert on drawing; otherwise drop an H-line at cursor price and alert on it
+          let target = selectedDrawingId
+            ? drawingsRef.current.find((d) => d.id === selectedDrawingId) ?? null
+            : null;
+          if (!target) {
+            const anchor = resolveCursorAnchor();
+            if (!anchor) return;
+            target = {
+              id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              type: "horizontal_line",
+              startTime: anchor.time,
+              startPrice: anchor.price,
+              endTime: anchor.time + 86400000,
+              endPrice: anchor.price,
+              color: "#f5ac37",
+              lineWidth: 1.5,
+              lineStyle: "dashed",
+              isLocked: isDrawingsLocked || false,
+            };
+            saveDrawings([...drawingsRef.current, target]);
+            setSelectedDrawingId(target.id);
+          }
+          const newAlerts = createAlertsFromDrawing(target, symbolRef.current);
+          window.dispatchEvent(
+            new CustomEvent("mochex:create-drawing-alert", { detail: { alerts: newAlerts } })
+          );
+          flashToast("Alert created");
+          return;
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [
+    isActivePane,
+    selectedDrawingId,
+    isDrawingsLocked,
+    onSelectDrawingTool,
+    saveDrawings,
+    coordinateToPrice,
+    coordinateToTime,
   ]);
 
   // Mouse handlers for drawing overlay (DEC-042 to DEC-056)
@@ -5800,18 +5937,40 @@ export function TradingViewContainer({
                 </button>
               )}
 
-              {/* Scroll to Real-Time Latest Candle */}
+              {/* Reset Chart View / Scroll to Latest (Alt+R) */}
               <button
                 onClick={() => {
                   setActiveQuickRange(null);
+                  chartRef.current?.priceScale("right").applyOptions({ autoScale: true });
+                  chartRef.current?.timeScale().resetTimeScale();
                   chartRef.current?.timeScale().scrollToRealTime();
                 }}
-                title="Jump to Latest Real-Time Candle"
+                title="Reset Chart View & Jump to Latest (Alt+R)"
                 className="px-1.5 py-0.5 rounded text-muted hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
               >
-                Latest &rarr;
+                Reset &rarr;
               </button>
+
+              {isPriceScaleInverted && (
+                <button
+                  onClick={() => {
+                    setIsPriceScaleInverted(false);
+                    chartRef.current?.priceScale("right").applyOptions({ invertScale: false });
+                  }}
+                  title="Price scale inverted (Alt+I to toggle)"
+                  className="px-1.5 py-0.5 rounded bg-gold/15 border border-gold/40 text-gold font-bold cursor-pointer"
+                >
+                  INV
+                </button>
+              )}
             </div>
+
+            {/* Transient Keyboard Shortcut Feedback Toast (DEC-077) */}
+            {shortcutToast && (
+              <div className="absolute bottom-16 left-2 z-30 bg-[#161a25]/95 border border-primary/50 text-white px-2.5 py-1 rounded text-[10px] font-mono shadow-lg pointer-events-none">
+                {shortcutToast}
+              </div>
+            )}
           </div>
         )}
       </div>

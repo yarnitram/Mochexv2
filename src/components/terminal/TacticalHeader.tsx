@@ -19,6 +19,7 @@ import {
   Columns2,
   Rows2,
   Square,
+  Keyboard,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
@@ -50,6 +51,7 @@ interface TacticalHeaderProps {
   onSelectGridLayout?: (mode: GridLayoutMode) => void;
   gridSync?: GridSyncConfig;
   onToggleGridSync?: (key: keyof GridSyncConfig) => void;
+  onOpenShortcuts?: () => void;
 }
 
 const TIMEFRAMES = [
@@ -90,6 +92,7 @@ export function TacticalHeader({
   onSelectGridLayout,
   gridSync = { syncSymbol: false, syncInterval: false, syncCrosshair: true },
   onToggleGridSync,
+  onOpenShortcuts,
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isGridDropdownOpen, setIsGridDropdownOpen] = useState(false);
@@ -460,6 +463,17 @@ export function TacticalHeader({
             onOpenAuthModal={onOpenAuthModal || (() => {})}
           />
         </div>
+
+        {/* Keyboard Shortcuts Cheatsheet Trigger (?) */}
+        {onOpenShortcuts && (
+          <button
+            onClick={onOpenShortcuts}
+            title="Keyboard Shortcuts (?)"
+            className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border border-outline-variant/30 transition-colors cursor-pointer"
+          >
+            <Keyboard size={15} />
+          </button>
+        )}
 
         {/* Fullscreen Toggle */}
         <button

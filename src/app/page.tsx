@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { TacticalHeader } from "@/components/terminal/TacticalHeader";
 import { DrawingRail, DrawingToolType } from "@/components/terminal/DrawingRail";
 import { RightSidebar } from "@/components/terminal/RightSidebar";
 import { ScriptStudio } from "@/components/terminal/ScriptStudio";
 import { IndicatorsModal } from "@/components/terminal/IndicatorsModal";
+import { ShortcutsCheatsheetModal } from "@/components/terminal/ShortcutsCheatsheetModal";
 import { ReplaySimulationPill } from "@/components/terminal/ReplaySimulationPill";
 import { TradingViewContainer } from "@/components/chart/TradingViewContainer";
 import { MobileTacticalDrawer } from "@/components/mobile/MobileTacticalDrawer";
@@ -32,6 +33,14 @@ import {
   GridSyncConfig,
   MultiChartWorkspaceState,
 } from "@/lib/chart/multi-chart-grid";
+import { isTypingTarget } from "@/lib/ui/keyboard-shortcuts";
+import {
+  DEFAULT_SPLIT_SIZES,
+  SplitSizesByLayout,
+  buildGridTemplate,
+  computeSplitFraction,
+  parseSplitSizes,
+} from "@/lib/ui/resizable-layout";
 
 function formatResolutionBadge(res: string): string {
   if (res === "1D" || res === "1W") return res;
@@ -44,11 +53,16 @@ export default function WorkstationPage() {
   // Authentication session
   const { user, login, register, logout } = useAuth();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
 
-  // Multi-Chart Split-Screen Workspace State
+  // Multi-Chart Split-Screen Workspace State & Resizable Split Fractions (DEC-075 & DEC-077)
   const [gridState, setGridState] = useState<MultiChartWorkspaceState>(() =>
     createInitialMultiChartState("BTCUSDT", "15")
   );
+  const [splitSizes, setSplitSizes] = useState<SplitSizesByLayout>(() => ({
+    ...DEFAULT_SPLIT_SIZES,
+  }));
+  const gridContainerRef = useRef<HTMLDivElement>(null);
 
   // Workspace state with localStorage persistence
   const [symbol, setSymbol] = useState("BTCUSDT");
@@ -138,6 +152,11 @@ export default function WorkstationPage() {
       const savedFavs = localStorage.getItem("mochex:favorite_drawing_tools");
       const savedShowFavs = localStorage.getItem("mochex:show_favorites_bar");
       const savedGrid = localStorage.getItem("mochex:multi_chart_grid");
+      const savedSplitSizes = localStorage.getItem("mochex:split_sizes");
+
+      if (savedSplitSizes) {
+        setSplitSizes(parseSplitSizes(savedSplitSizes));
+      }
 
       if (savedGrid) {
         const parsedGrid = JSON.parse(savedGrid) as MultiChartWorkspaceState;
@@ -173,15 +192,33 @@ export default function WorkstationPage() {
     } catch {}
   }, [gridState]);
 
-  // Alt+Enter shortcut to Maximize / Restore active split pane
+  // Persist splitSizes changes to localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem("mochex:split_sizes", JSON.stringify(splitSizes));
+    } catch {}
+  }, [splitSizes]);
+
+  // Alt+Enter shortcut to Maximize / Restore active split pane & '?' for Shortcuts Cheatsheet (DEC-075 & DEC-077)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isTypingTarget(document.activeElement)) return;
       if (e.altKey && e.key === "Enter") {
         e.preventDefault();
         setGridState((prev) => {
           if (prev.layoutMode === "1x1") return prev;
           return toggleMaximizePane(prev, prev.activePaneId);
         });
+        return;
+      }
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === "?") {
+        e.preventDefault();
+        setIsShortcutsModalOpen((prev) => !prev);
+        return;
+      }
+      if (e.key === "Escape") {
+        setIsShortcutsModalOpen(false);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -357,14 +394,63 @@ export default function WorkstationPage() {
 
   const visiblePanes = getVisiblePanes(gridState);
   const isSplitGrid = gridState.layoutMode !== "1x1";
-  const effectiveGridClass =
-    gridState.maximizedPaneId || gridState.layoutMode === "1x1"
-      ? "grid-cols-1 grid-rows-1"
-      : gridState.layoutMode === "2x1"
-        ? "grid-cols-1 md:grid-cols-2 grid-rows-1"
-        : gridState.layoutMode === "1x2"
-          ? "grid-cols-1 grid-rows-2"
-          : "grid-cols-1 md:grid-cols-2 grid-rows-2";
+  const currentSplit = splitSizes[gridState.layoutMode] || { col: 0.5, row: 0.5 };
+  const gridTemplate = buildGridTemplate(
+    gridState.layoutMode,
+    currentSplit,
+    Boolean(gridState.maximizedPaneId)
+  );
+
+  const handleStartSplitDrag = (axis: "col" | "row" | "both") => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const container = gridContainerRef.current;
+    if (!container) return;
+    const mode = gridState.layoutMode;
+
+    const onMove = (ev: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      setSplitSizes((prev) => {
+        const cur = prev[mode] || { col: 0.5, row: 0.5 };
+        return {
+          ...prev,
+          [mode]: {
+            col:
+              axis === "col" || axis === "both"
+                ? computeSplitFraction(ev.clientX, rect.left, rect.width)
+                : cur.col,
+            row:
+              axis === "row" || axis === "both"
+                ? computeSplitFraction(ev.clientY, rect.top, rect.height)
+                : cur.row,
+          },
+        };
+      });
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const handleResetSplitAxis = (axis: "col" | "row" | "both") => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const mode = gridState.layoutMode;
+    setSplitSizes((prev) => {
+      const cur = prev[mode] || { col: 0.5, row: 0.5 };
+      return {
+        ...prev,
+        [mode]: {
+          col: axis === "col" || axis === "both" ? 0.5 : cur.col,
+          row: axis === "row" || axis === "both" ? 0.5 : cur.row,
+        },
+      };
+    });
+  };
 
   return (
     <main className="h-screen w-screen flex flex-col bg-background select-none overflow-hidden font-sans">
@@ -395,6 +481,7 @@ export default function WorkstationPage() {
         onSelectGridLayout={handleSelectGridLayout}
         gridSync={gridState.sync}
         onToggleGridSync={handleToggleGridSync}
+        onOpenShortcuts={() => setIsShortcutsModalOpen(true)}
       />
 
       {/* 2. Main Terminal Workspace Body */}
@@ -422,7 +509,14 @@ export default function WorkstationPage() {
 
         {/* Center Workspace (Multi-Chart Split-Screen Grid + Replay Simulation Pill) */}
         <div className="flex-1 flex flex-col relative overflow-hidden">
-          <div className={`flex-1 relative w-full h-full grid gap-[2px] bg-border/60 ${effectiveGridClass}`}>
+          <div
+            ref={gridContainerRef}
+            style={{
+              gridTemplateColumns: gridTemplate.columns,
+              gridTemplateRows: gridTemplate.rows,
+            }}
+            className="flex-1 relative w-full h-full grid gap-[2px] bg-border/60"
+          >
             {visiblePanes.map((pane, idx) => {
               const isPaneActive = pane.id === gridState.activePaneId;
               const isPaneMaximized = gridState.maximizedPaneId === pane.id;
@@ -485,6 +579,7 @@ export default function WorkstationPage() {
 
                   <TradingViewContainer
                     paneId={pane.id}
+                    isActivePane={isPaneActive}
                     symbol={pane.symbol}
                     resolution={pane.resolution}
                     syncCrosshair={
@@ -520,6 +615,48 @@ export default function WorkstationPage() {
                 </div>
               );
             })}
+
+            {/* Draggable Split-Screen Resize Dividers (DEC-077) */}
+            {isSplitGrid && !gridState.maximizedPaneId && (
+              <>
+                {(gridState.layoutMode === "2x1" || gridState.layoutMode === "2x2") && (
+                  <div
+                    onMouseDown={handleStartSplitDrag("col")}
+                    onDoubleClick={handleResetSplitAxis("col")}
+                    style={{ left: `calc(${currentSplit.col * 100}% - 3px)` }}
+                    title="Drag to resize columns · Double-click to reset 50/50"
+                    className="hidden md:flex absolute top-0 bottom-0 w-1.5 z-30 cursor-col-resize items-center justify-center group hover:bg-[#2962ff]/35 transition-colors"
+                  >
+                    <div className="w-[2px] h-10 rounded-full bg-transparent group-hover:bg-[#2962ff]" />
+                  </div>
+                )}
+
+                {(gridState.layoutMode === "1x2" || gridState.layoutMode === "2x2") && (
+                  <div
+                    onMouseDown={handleStartSplitDrag("row")}
+                    onDoubleClick={handleResetSplitAxis("row")}
+                    style={{ top: `calc(${currentSplit.row * 100}% - 3px)` }}
+                    title="Drag to resize rows · Double-click to reset 50/50"
+                    className="flex absolute left-0 right-0 h-1.5 z-30 cursor-row-resize items-center justify-center group hover:bg-[#2962ff]/35 transition-colors"
+                  >
+                    <div className="h-[2px] w-10 rounded-full bg-transparent group-hover:bg-[#2962ff]" />
+                  </div>
+                )}
+
+                {gridState.layoutMode === "2x2" && (
+                  <div
+                    onMouseDown={handleStartSplitDrag("both")}
+                    onDoubleClick={handleResetSplitAxis("both")}
+                    style={{
+                      left: `calc(${currentSplit.col * 100}% - 6px)`,
+                      top: `calc(${currentSplit.row * 100}% - 6px)`,
+                    }}
+                    title="Drag to resize all 4 panes · Double-click to reset 50/50"
+                    className="hidden md:flex absolute w-3 h-3 rounded-full z-40 cursor-move items-center justify-center bg-[#161a25] border border-outline-variant/60 hover:border-[#2962ff] hover:bg-[#2962ff] transition-colors shadow-md"
+                  />
+                )}
+              </>
+            )}
 
             {/* In-chart Floating Simulation Control Pill */}
             {isReplayActive && (
@@ -594,6 +731,12 @@ export default function WorkstationPage() {
         onLogin={login}
         onRegister={register}
         onLogout={logout}
+      />
+
+      {/* 6. TradingView Keyboard Shortcuts Cheatsheet Modal (?) */}
+      <ShortcutsCheatsheetModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setIsShortcutsModalOpen(false)}
       />
     </main>
   );
