@@ -5,9 +5,29 @@ export interface FetchKlinesOptions {
   resolution: string; // TradingView resolution string (e.g. "15", "60", "1D")
   startTime?: number; // ms
   endTime?: number;   // ms
-  limit?: number;     // max 1000
+  limit?: number;     // max 1000 (MEXC V3 returns max 500 per call)
   forceProxy?: boolean;
 }
+
+export interface FetchDeepKlinesOptions {
+  symbol: string;
+  resolution: string;
+  targetCount?: number; // e.g. 1500 candles across multiple 500-bar batches
+  endTime?: number;     // optional cutoff timestamp (ms)
+  forceProxy?: boolean;
+}
+
+const INTERVAL_DURATION_MS: Record<MexcResolution, number> = {
+  "1m": 60 * 1000,
+  "5m": 5 * 60 * 1000,
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
+  "60m": 60 * 60 * 1000,
+  "4h": 4 * 60 * 60 * 1000,
+  "1d": 24 * 60 * 60 * 1000,
+  "1W": 7 * 24 * 60 * 60 * 1000,
+  "1M": 30 * 24 * 60 * 60 * 1000,
+};
 
 export class MexcClient {
   private apiBase: string;
@@ -29,13 +49,25 @@ export class MexcClient {
   }
 
   /**
+   * Resolves TradingView resolution to bar duration in milliseconds
+   */
+  public toIntervalMs(resolution: string): number {
+    const interval = this.toMexcInterval(resolution);
+    return INTERVAL_DURATION_MS[interval] || 15 * 60 * 1000;
+  }
+
+  /**
    * Fetches klines using hybrid strategy:
    * 1. Direct fetch to MEXC public API (client-centric)
    * 2. Automatic fallback to internal Next.js proxy route on failure or CORS restriction
+   * Note: MEXC V3 ignores `endTime` unless `startTime` is also provided; we automatically
+   * compute `startTime` when `endTime` is supplied alone.
    */
   public async getKlines(options: FetchKlinesOptions): Promise<CandlestickBar[]> {
     const { symbol, resolution, startTime, endTime, limit = 1000, forceProxy = false } = options;
     const interval = this.toMexcInterval(resolution);
+    const barDurationMs = this.toIntervalMs(resolution);
+    const effectiveBatchSize = Math.min(limit, 500);
 
     const queryParams = new URLSearchParams({
       symbol: symbol.toUpperCase(),
@@ -43,8 +75,15 @@ export class MexcClient {
       limit: Math.min(limit, 1000).toString(),
     });
 
-    if (startTime) queryParams.set("startTime", startTime.toString());
-    if (endTime) queryParams.set("endTime", endTime.toString());
+    const computedStartTime =
+      startTime !== undefined
+        ? startTime
+        : endTime !== undefined
+          ? Math.max(0, endTime - effectiveBatchSize * barDurationMs)
+          : undefined;
+
+    if (computedStartTime !== undefined) queryParams.set("startTime", computedStartTime.toString());
+    if (endTime !== undefined) queryParams.set("endTime", endTime.toString());
 
     if (!forceProxy && typeof window !== "undefined") {
       try {
@@ -73,6 +112,61 @@ export class MexcClient {
     return this.fetchFromProxy(queryParams);
   }
 
+  /**
+   * Stitches multiple 500-bar historical batches backwards in time to provide deep
+   * chart history (e.g. 1,500 initial bars or +1,000 backfill bars).
+   */
+  public async getDeepKlines(options: FetchDeepKlinesOptions): Promise<CandlestickBar[]> {
+    const {
+      symbol,
+      resolution,
+      targetCount = 1500,
+      endTime,
+      forceProxy = false,
+    } = options;
+
+    const clampedTarget = Math.max(100, Math.min(targetCount, 10000));
+    const maxBatches = Math.ceil(clampedTarget / 500) + 1;
+    const barMap = new Map<number, CandlestickBar>();
+    let cursorEndTime: number | undefined = endTime;
+
+    for (let i = 0; i < maxBatches && barMap.size < clampedTarget; i++) {
+      const remaining = clampedTarget - barMap.size;
+      const batchLimit = Math.max(200, Math.min(remaining, 500));
+
+      const batch = await this.getKlines({
+        symbol,
+        resolution,
+        limit: batchLimit,
+        endTime: cursorEndTime,
+        forceProxy,
+      });
+
+      if (!batch || batch.length === 0) break;
+
+      let newBarsAdded = 0;
+      for (const bar of batch) {
+        if (!barMap.has(bar.time)) {
+          barMap.set(bar.time, bar);
+          newBarsAdded++;
+        }
+      }
+
+      if (newBarsAdded === 0 || batch.length < 10) {
+        break;
+      }
+
+      const oldestInBatch = batch[0].time;
+      cursorEndTime = oldestInBatch - 1;
+    }
+
+    const sorted = Array.from(barMap.values()).sort((a, b) => a.time - b.time);
+    if (sorted.length > clampedTarget) {
+      return sorted.slice(sorted.length - clampedTarget);
+    }
+    return sorted;
+  }
+
   private async fetchFromProxy(params: URLSearchParams): Promise<CandlestickBar[]> {
     const proxyUrl = `${this.proxyBase}/klines?${params.toString()}`;
     const response = await fetch(proxyUrl, {
@@ -97,3 +191,4 @@ export class MexcClient {
 }
 
 export const mexcClient = new MexcClient();
+

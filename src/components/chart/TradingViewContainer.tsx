@@ -7,7 +7,7 @@ import { mexcWsManager } from "@/lib/mexc/websocket";
 import { replayEngine, ReplayState } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play, RefreshCw } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
 import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
@@ -231,6 +231,9 @@ export function TradingViewContainer({
   const [hasLibrary, setHasLibrary] = useState(false);
   const [bars, setBars] = useState<CandlestickBar[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [canLoadMoreHistory, setCanLoadMoreHistory] = useState(true);
+  const [activeQuickRange, setActiveQuickRange] = useState<string | null>(null);
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [hoveredStats, setHoveredStats] = useState<HoveredStats | null>(null);
   const [replayState, setReplayState] = useState<ReplayState>("IDLE");
@@ -496,31 +499,38 @@ export function TradingViewContainer({
       }
     });
 
-    // 2.6 Infinite Scroll Pagination on Left Boundary Panning (DEC-033)
+    // 2.6 Infinite Scroll Pagination on Left Boundary Panning (DEC-033 & DEC-076)
     const onLogicalRangeChange = async (newRange: LogicalRange | null) => {
       if (!newRange) return;
       const now = Date.now();
       // Only trigger when initial data load is complete and cooldown has passed
       if (!isInitialLoadDone.current) return;
-      if (now - lastBackfillTime.current < 2000) return;
+      if (now - lastBackfillTime.current < 600) return;
 
-      if (newRange.from < 5 && !isFetchingOlderBars.current && hasMoreHistory.current) {
+      if (
+        newRange.from < 25 &&
+        !isFetchingOlderBars.current &&
+        hasMoreHistory.current &&
+        barsRef.current.length < 10000
+      ) {
         const currentBars = barsRef.current;
-        if (currentBars.length < 50) return;
+        if (currentBars.length < 20) return;
         const oldestBar = currentBars[0];
 
         lastBackfillTime.current = now;
         isFetchingOlderBars.current = true;
+        setIsLoadingOlder(true);
         try {
           const olderBars = await mexcClient.getKlines({
             symbol: symbolRef.current,
             resolution: resolutionRef.current,
-            limit: 300,
+            limit: 500,
             endTime: oldestBar.time - 1,
           });
 
           if (!olderBars || olderBars.length < 2) {
             hasMoreHistory.current = false;
+            setCanLoadMoreHistory(false);
             return;
           }
 
@@ -531,6 +541,9 @@ export function TradingViewContainer({
             barsRef.current = merged;
             setBars(merged);
             onBarsLoadedRef.current?.(merged);
+            if (replayEngine.getState() === "IDLE") {
+              replayEngine.loadHistory(merged as Bar[]);
+            }
 
             // Re-populate series with merged dataset
             candleSeries.setData(formatCandlestickData(merged));
@@ -562,11 +575,13 @@ export function TradingViewContainer({
             }
           } else {
             hasMoreHistory.current = false;
+            setCanLoadMoreHistory(false);
           }
         } catch (err) {
           console.error("Failed to backfill historical bars:", err);
         } finally {
           isFetchingOlderBars.current = false;
+          setIsLoadingOlder(false);
         }
       }
     };
@@ -603,19 +618,158 @@ export function TradingViewContainer({
     };
   }, [hasLibrary]);
 
-  // 3. Load historical klines and attach real-time MEXC feed
+  // 2.8 Manual & Quick-Range Deep History Backfill (DEC-076)
+  const fetchMoreOlderCandles = useCallback(
+    async (batchTarget = 1000, preserveViewport = true): Promise<CandlestickBar[]> => {
+      if (
+        isFetchingOlderBars.current ||
+        !hasMoreHistory.current ||
+        barsRef.current.length === 0 ||
+        barsRef.current.length >= 10000
+      ) {
+        return barsRef.current;
+      }
+
+      const currentBars = barsRef.current;
+      const oldestBar = currentBars[0];
+      isFetchingOlderBars.current = true;
+      setIsLoadingOlder(true);
+      lastBackfillTime.current = Date.now();
+
+      try {
+        const olderBars = await mexcClient.getDeepKlines({
+          symbol: symbolRef.current,
+          resolution: resolutionRef.current,
+          targetCount: batchTarget,
+          endTime: oldestBar.time - 1,
+        });
+
+        if (!olderBars || olderBars.length < 2) {
+          hasMoreHistory.current = false;
+          setCanLoadMoreHistory(false);
+          return currentBars;
+        }
+
+        const merged = mergeAndDeduplicateBars(olderBars, currentBars);
+        const addedCount = merged.length - currentBars.length;
+
+        if (addedCount > 0) {
+          barsRef.current = merged;
+          setBars(merged);
+          onBarsLoadedRef.current?.(merged);
+          if (replayEngine.getState() === "IDLE") {
+            replayEngine.loadHistory(merged as Bar[]);
+          }
+
+          const prevRange = chartRef.current?.timeScale().getVisibleLogicalRange();
+
+          candleSeriesRef.current?.setData(formatCandlestickData(merged));
+          volumeSeriesRef.current?.setData(formatVolumeData(merged));
+          ema20SeriesRef.current?.setData(buildEmaLineData(merged, 20));
+          ema50SeriesRef.current?.setData(buildEmaLineData(merged, 50));
+          const bbData = buildBollingerBandsData(merged, 20, 2);
+          bbUpperSeriesRef.current?.setData(bbData.upper);
+          bbMiddleSeriesRef.current?.setData(bbData.middle);
+          bbLowerSeriesRef.current?.setData(bbData.lower);
+
+          if (rsiSeriesRef.current) {
+            rsiSeriesRef.current.setData(buildRsiData(merged, rsiPeriod));
+          }
+          if (
+            macdLineSeriesRef.current &&
+            macdSignalSeriesRef.current &&
+            macdHistSeriesRef.current
+          ) {
+            const macdData = buildMacdData(merged, macdFast, macdSlow, macdSignal);
+            macdLineSeriesRef.current.setData(macdData.macd);
+            macdSignalSeriesRef.current.setData(macdData.signal);
+            macdHistSeriesRef.current.setData(macdData.histogram);
+          }
+
+          if (preserveViewport && prevRange && chartRef.current) {
+            chartRef.current.timeScale().setVisibleLogicalRange({
+              from: prevRange.from + addedCount,
+              to: prevRange.to + addedCount,
+            });
+          }
+          return merged;
+        } else {
+          hasMoreHistory.current = false;
+          setCanLoadMoreHistory(false);
+          return currentBars;
+        }
+      } catch (err) {
+        console.error("Failed to fetch older history:", err);
+        return currentBars;
+      } finally {
+        isFetchingOlderBars.current = false;
+        setIsLoadingOlder(false);
+      }
+    },
+    [rsiPeriod, macdFast, macdSlow, macdSignal]
+  );
+
+  const handleSelectQuickRange = useCallback(
+    async (rangeKey: "1D" | "1W" | "1M" | "3M" | "ALL") => {
+      if (!chartRef.current || barsRef.current.length === 0) return;
+      setActiveQuickRange(rangeKey);
+
+      if (rangeKey === "ALL") {
+        chartRef.current.timeScale().fitContent();
+        return;
+      }
+
+      const spanMsMap: Record<"1D" | "1W" | "1M" | "3M", number> = {
+        "1D": 24 * 60 * 60 * 1000,
+        "1W": 7 * 24 * 60 * 60 * 1000,
+        "1M": 30 * 24 * 60 * 60 * 1000,
+        "3M": 90 * 24 * 60 * 60 * 1000,
+      };
+
+      const spanMs = spanMsMap[rangeKey];
+      let activeBars = barsRef.current;
+      const latestTime = activeBars[activeBars.length - 1].time;
+      const targetStartMs = latestTime - spanMs;
+
+      // If target range reaches further back than currently loaded candles, backfill first
+      if (targetStartMs < activeBars[0].time && hasMoreHistory.current) {
+        const resMs = Math.max(60000, getResolutionMs(resolutionRef.current));
+        const missingBarsNeeded = Math.min(
+          2000,
+          Math.ceil((activeBars[0].time - targetStartMs) / resMs) + 100
+        );
+        activeBars = await fetchMoreOlderCandles(missingBarsNeeded, false);
+      }
+
+      if (!chartRef.current || activeBars.length === 0) return;
+      const clampedStartMs = Math.max(activeBars[0].time, targetStartMs);
+      try {
+        chartRef.current.timeScale().setVisibleRange({
+          from: toUtcTimestamp(clampedStartMs),
+          to: toUtcTimestamp(activeBars[activeBars.length - 1].time),
+        });
+      } catch {
+        chartRef.current.timeScale().fitContent();
+      }
+    },
+    [fetchMoreOlderCandles]
+  );
+
+  // 3. Load 1,500 historical klines (3 stitched 500-bar batches) and attach real-time MEXC feed (DEC-076)
   useEffect(() => {
     let isCancelled = false;
     hasMoreHistory.current = true;
+    setCanLoadMoreHistory(true);
+    setActiveQuickRange(null);
     isInitialLoadDone.current = false;
     setIsLoading(true);
 
     const loadData = async () => {
       try {
-        const fetchedBars = await mexcClient.getKlines({
+        const fetchedBars = await mexcClient.getDeepKlines({
           symbol,
           resolution,
-          limit: 300,
+          targetCount: 1500,
         });
 
         if (!isCancelled) {
@@ -653,19 +807,20 @@ export function TradingViewContainer({
             chartRef.current?.timeScale().scrollToRealTime();
             setTimeout(() => {
               isInitialLoadDone.current = true;
-            }, 1000);
+            }, 600);
           }
 
           if (sorted.length > 0) {
             const lastBar = sorted[sorted.length - 1];
-            const firstBar = sorted[0];
+            const firstBar = sorted[Math.max(0, sorted.length - 96)];
             const change =
               firstBar.open > 0
                 ? ((lastBar.close - firstBar.open) / firstBar.open) * 100
                 : 0;
-            const high = Math.max(...sorted.map((b) => b.high));
-            const low = Math.min(...sorted.map((b) => b.low));
-            const volume = sorted.reduce((acc, b) => acc + b.volume, 0);
+            const recentWindow = sorted.slice(-96);
+            const high = Math.max(...recentWindow.map((b) => b.high));
+            const low = Math.min(...recentWindow.map((b) => b.low));
+            const volume = recentWindow.reduce((acc, b) => acc + b.volume, 0);
 
             setCurrentPrice(lastBar.close);
             onPriceUpdateRef.current?.({
@@ -5588,15 +5743,74 @@ export function TradingViewContainer({
               </div>
             )}
 
-            {/* Proprietary Advanced Library Drop-In Ready Indicator */}
-            <div className="absolute bottom-2 left-2 z-20 hidden sm:flex items-center gap-2 bg-surface-container-lowest/90 border border-border px-2.5 py-1 rounded text-[10px] text-muted font-mono backdrop-blur-xs">
-              <Layers size={11} className="text-primary-container" />
-              <span>
-                TradingView JS API feed ready &bull; Drop library into{" "}
-                <code className="text-primary bg-surface px-1 rounded">
-                  public/charting_library/
-                </code>
+            {/* TradingView-Style Historical Depth & Quick-Range Bar (DEC-076) */}
+            <div className="absolute bottom-7 left-2 z-20 hidden sm:flex items-center gap-1 bg-[#12161f]/90 border border-outline-variant/40 px-2 py-1 rounded-md text-[10px] font-mono backdrop-blur-md shadow-lg">
+              {(["1D", "1W", "1M", "3M", "ALL"] as const).map((rangeKey) => {
+                const isActive = activeQuickRange === rangeKey;
+                return (
+                  <button
+                    key={rangeKey}
+                    onClick={() => handleSelectQuickRange(rangeKey)}
+                    title={
+                      rangeKey === "ALL"
+                        ? `Fit all ${bars.length.toLocaleString()} loaded candles`
+                        : `Zoom to ${rangeKey} range`
+                    }
+                    className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                      isActive
+                        ? "bg-primary/20 text-primary font-bold border border-primary/40"
+                        : "text-muted hover:text-on-surface hover:bg-surface-container"
+                    }`}
+                  >
+                    {rangeKey}
+                  </button>
+                );
+              })}
+
+              <div className="w-px h-3.5 bg-outline-variant/40 mx-1" />
+
+              {/* Loaded Candle Count Telemetry */}
+              <span
+                className="text-on-surface font-semibold px-1"
+                title={
+                  bars.length > 0
+                    ? `Oldest: ${new Date(bars[0].time).toISOString().slice(0, 16).replace("T", " ")} UTC`
+                    : "Loading historical candles..."
+                }
+              >
+                {bars.length.toLocaleString()} Bars
               </span>
+
+              {/* 1-Click Deep Historical Backfill (+1,000 Candles) */}
+              {canLoadMoreHistory && bars.length < 10000 && (
+                <button
+                  onClick={() => fetchMoreOlderCandles(1000, true)}
+                  disabled={isLoadingOlder}
+                  title="Fetch 1,000 older historical candles from MEXC"
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded border transition-colors ${
+                    isLoadingOlder
+                      ? "bg-primary/10 border-primary/30 text-primary cursor-wait"
+                      : "bg-surface-container-low hover:bg-primary/20 border-outline-variant/40 hover:border-primary/50 text-cyan hover:text-white cursor-pointer"
+                  }`}
+                >
+                  {isLoadingOlder ? (
+                    <RefreshCw size={10} className="animate-spin text-primary" />
+                  ) : null}
+                  <span>{isLoadingOlder ? "Loading..." : "+1K Older"}</span>
+                </button>
+              )}
+
+              {/* Scroll to Real-Time Latest Candle */}
+              <button
+                onClick={() => {
+                  setActiveQuickRange(null);
+                  chartRef.current?.timeScale().scrollToRealTime();
+                }}
+                title="Jump to Latest Real-Time Candle"
+                className="px-1.5 py-0.5 rounded text-muted hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
+              >
+                Latest &rarr;
+              </button>
             </div>
           </div>
         )}

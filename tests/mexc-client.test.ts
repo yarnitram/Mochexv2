@@ -52,4 +52,47 @@ describe("MexcClient & Data Transformations", () => {
     expect(transformed[1].time).toBe(2000);
     expect(transformed[2].time).toBe(3000);
   });
+
+  it("should resolve TradingView resolutions to millisecond durations", () => {
+    expect(client.toIntervalMs("1")).toBe(60 * 1000);
+    expect(client.toIntervalMs("15")).toBe(15 * 60 * 1000);
+    expect(client.toIntervalMs("60")).toBe(60 * 60 * 1000);
+    expect(client.toIntervalMs("240")).toBe(4 * 60 * 60 * 1000);
+    expect(client.toIntervalMs("1D")).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it("should stitch multiple 500-bar historical batches backwards in getDeepKlines", async () => {
+    const stepMs = 15 * 60 * 1000;
+    const baseTime = 1700000000000;
+
+    const getKlinesSpy = vi.spyOn(client, "getKlines").mockImplementation(async (opts) => {
+      const end = opts.endTime ?? baseTime;
+      const bars = [];
+      for (let i = 0; i < 500; i++) {
+        const t = end - (499 - i) * stepMs;
+        bars.push({
+          time: t,
+          open: 100,
+          high: 105,
+          low: 95,
+          close: 102,
+          volume: 10,
+        });
+      }
+      return bars;
+    });
+
+    const deepBars = await client.getDeepKlines({
+      symbol: "BTCUSDT",
+      resolution: "15",
+      targetCount: 1500,
+    });
+
+    expect(getKlinesSpy).toHaveBeenCalledTimes(3);
+    expect(deepBars.length).toBe(1500);
+    expect(deepBars[0].time).toBeLessThan(deepBars[deepBars.length - 1].time);
+
+    getKlinesSpy.mockRestore();
+  });
 });
+
