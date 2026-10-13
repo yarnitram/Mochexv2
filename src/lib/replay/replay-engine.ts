@@ -4,8 +4,30 @@ export type ReplayState = "IDLE" | "SELECTING" | "PAUSED" | "PLAYING";
 
 export interface ReplayEngineListener {
   onStateChange?(state: ReplayState): void;
-  onTick?(bar: Bar, cursorIndex: number, totalBars: number): void;
+  onTick?(bar: Bar, cursorIndex: number, totalBars: number, isForwardStep?: boolean): void;
   onEnd?(): void;
+}
+
+/**
+ * Generates a realistic intrabar price trajectory [Open -> Low -> High -> Close] for bullish candles
+ * or [Open -> High -> Low -> Close] for bearish candles so Limit orders, Stop Losses, Take Profits,
+ * and Crossing Alerts trigger accurately on intrabar wicks during Bar Replay (DEC-073).
+ */
+export function getIntrabarPricePath(bar: Bar): number[] {
+  if (!bar) return [];
+  const isBullish = bar.close >= bar.open;
+  const rawPath = isBullish
+    ? [bar.open, bar.low, bar.high, bar.close]
+    : [bar.open, bar.high, bar.low, bar.close];
+
+  // Deduplicate consecutive identical prices while preserving order
+  const deduped: number[] = [];
+  for (const p of rawPath) {
+    if (Number.isFinite(p) && p > 0 && deduped[deduped.length - 1] !== p) {
+      deduped.push(p);
+    }
+  }
+  return deduped;
 }
 
 export class BarReplayEngine {
@@ -33,6 +55,17 @@ export class BarReplayEngine {
     return this.allBars.length;
   }
 
+  public getAllBars(): Bar[] {
+    return [...this.allBars];
+  }
+
+  public getCurrentBar(): Bar | null {
+    if (this.cursorIndex >= 0 && this.cursorIndex < this.allBars.length) {
+      return this.allBars[this.cursorIndex];
+    }
+    return this.allBars.length > 0 ? this.allBars[this.allBars.length - 1] : null;
+  }
+
   public getVisibleBars(): Bar[] {
     if (this.state === "IDLE" || this.cursorIndex < 0) {
       return [...this.allBars];
@@ -42,6 +75,9 @@ export class BarReplayEngine {
 
   public loadHistory(bars: Bar[]): void {
     this.allBars = [...bars].sort((a, b) => a.time - b.time);
+    if (this.cursorIndex >= this.allBars.length) {
+      this.cursorIndex = this.allBars.length - 1;
+    }
   }
 
   public startSelecting(): void {
@@ -51,22 +87,46 @@ export class BarReplayEngine {
   }
 
   public setCutoffTime(timestamp: number): boolean {
-    const idx = this.allBars.findIndex((b) => b.time >= timestamp);
-    if (idx === -1) {
-      this.cursorIndex = this.allBars.length - 1;
-    } else {
-      this.cursorIndex = idx;
+    if (this.allBars.length === 0) return false;
+    // Find nearest bar at or before timestamp, or first bar if before all
+    let bestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < this.allBars.length; i++) {
+      const diff = Math.abs(this.allBars[i].time - timestamp);
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestIdx = i;
+      }
     }
 
+    this.cursorIndex = Math.max(0, Math.min(this.allBars.length - 1, bestIdx));
     this.state = "PAUSED";
     this.notifyState();
-    this.notifyTick();
+    this.notifyTick(false);
+    return true;
+  }
+
+  public setCursorIndex(index: number): boolean {
+    if (this.allBars.length === 0) return false;
+    this.stopTimer();
+    this.cursorIndex = Math.max(0, Math.min(this.allBars.length - 1, Math.round(index)));
+    if (this.state === "IDLE" || this.state === "SELECTING") {
+      this.state = "PAUSED";
+      this.notifyState();
+    } else if (this.state === "PLAYING") {
+      this.state = "PAUSED";
+      this.notifyState();
+    }
+    this.notifyTick(false);
     return true;
   }
 
   public play(): void {
     if (this.state === "IDLE" || this.cursorIndex >= this.allBars.length - 1) {
       return;
+    }
+    if (this.state === "SELECTING" && this.cursorIndex < 0 && this.allBars.length > 0) {
+      this.cursorIndex = Math.max(0, this.allBars.length - 30);
     }
 
     this.state = "PLAYING";
@@ -87,6 +147,12 @@ export class BarReplayEngine {
   }
 
   public stepForward(): boolean {
+    if (this.state === "SELECTING" && this.cursorIndex < 0 && this.allBars.length > 0) {
+      this.cursorIndex = Math.max(0, this.allBars.length - 30);
+      this.state = "PAUSED";
+      this.notifyState();
+    }
+
     if (this.cursorIndex >= this.allBars.length - 1) {
       this.pause();
       this.listeners.forEach((l) => l.onEnd?.());
@@ -94,7 +160,7 @@ export class BarReplayEngine {
     }
 
     this.cursorIndex += 1;
-    this.notifyTick();
+    this.notifyTick(true);
     return true;
   }
 
@@ -103,8 +169,14 @@ export class BarReplayEngine {
       return false;
     }
 
+    this.stopTimer();
+    if (this.state === "PLAYING") {
+      this.state = "PAUSED";
+      this.notifyState();
+    }
+
     this.cursorIndex -= 1;
-    this.notifyTick();
+    this.notifyTick(false);
     return true;
   }
 
@@ -136,10 +208,12 @@ export class BarReplayEngine {
     this.listeners.forEach((l) => l.onStateChange?.(this.state));
   }
 
-  private notifyTick(): void {
+  private notifyTick(isForwardStep: boolean = false): void {
     if (this.cursorIndex >= 0 && this.cursorIndex < this.allBars.length) {
       const currentBar = this.allBars[this.cursorIndex];
-      this.listeners.forEach((l) => l.onTick?.(currentBar, this.cursorIndex, this.allBars.length));
+      this.listeners.forEach((l) =>
+        l.onTick?.(currentBar, this.cursorIndex, this.allBars.length, isForwardStep)
+      );
     }
   }
 }

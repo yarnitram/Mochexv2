@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   CandlestickChart,
   ChevronDown,
   RotateCcw,
+  Undo2,
+  Redo2,
   Maximize2,
   Minimize2,
   PanelRight,
@@ -78,6 +80,20 @@ export function TacticalHeader({
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    const onHistoryState = (e: Event) => {
+      const detail = (e as CustomEvent<{ canUndo: boolean; canRedo: boolean }>).detail;
+      if (detail) {
+        setCanUndo(Boolean(detail.canUndo));
+        setCanRedo(Boolean(detail.canRedo));
+      }
+    };
+    window.addEventListener("mochex:history-state", onHistoryState);
+    return () => window.removeEventListener("mochex:history-state", onHistoryState);
+  }, []);
 
   const formattedSymbol = symbol.replace("USDT", "/USDT");
   const isPositive = change24h >= 0;
@@ -181,7 +197,7 @@ export function TacticalHeader({
         </div>
       </div>
 
-      {/* Middle: Resolution Ribbon + Indicators Trigger + Bar Replay */}
+      {/* Middle: Resolution Ribbon + Indicators Trigger + Bar Replay + Undo/Redo */}
       <div className="hidden md:flex items-center gap-2">
         {/* Resolution Buttons */}
         <div className="flex items-center bg-surface-container-lowest p-0.5 rounded border border-border">
@@ -229,6 +245,35 @@ export function TacticalHeader({
           <RotateCcw size={12} className={isReplayActive ? "animate-spin" : ""} />
           <span>{isReplayActive ? "Replaying 1x" : "Replay"}</span>
         </button>
+
+        {/* Drawing Undo / Redo Buttons */}
+        <div className="flex items-center bg-surface-container-low rounded border border-outline-variant/30 p-0.5">
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("mochex:undo"))}
+            disabled={!canUndo}
+            title="Undo Drawing (Ctrl+Z)"
+            className={`p-1 rounded transition-colors ${
+              canUndo
+                ? "text-on-surface hover:bg-surface-container-high cursor-pointer"
+                : "text-muted/35 cursor-not-allowed"
+            }`}
+          >
+            <Undo2 size={13} />
+          </button>
+          <div className="w-px h-3.5 bg-border mx-0.5" />
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("mochex:redo"))}
+            disabled={!canRedo}
+            title="Redo Drawing (Ctrl+Y / Ctrl+Shift+Z)"
+            className={`p-1 rounded transition-colors ${
+              canRedo
+                ? "text-on-surface hover:bg-surface-container-high cursor-pointer"
+                : "text-muted/35 cursor-not-allowed"
+            }`}
+          >
+            <Redo2 size={13} />
+          </button>
+        </div>
       </div>
 
       {/* Right: Studio Toggle + Layout Manager Dropdown + User Profile */}

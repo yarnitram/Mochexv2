@@ -4,20 +4,48 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { CandlestickBar } from "@/lib/mexc/types";
 import { mexcClient } from "@/lib/mexc/client";
 import { mexcWsManager } from "@/lib/mexc/websocket";
-import { replayEngine } from "@/lib/replay/replay-engine";
+import { replayEngine, ReplayState } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestTrade } from "@/lib/strategy/types";
+import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
+import { calculateVisibleVolumeProfile } from "@/lib/indicators/volume-profile";
+import {
+  PaperAccountState,
+  createInitialPaperAccount,
+  createOrderInputFromDrawing,
+  calculatePositionUnrealizedPnl,
+} from "@/lib/trading/paper-trading-engine";
 import {
   ChartDrawing,
   calculateFibLevels,
+  calculateTrendFibLevels,
+  calculateGannBoxLevels,
   calculatePositionMetrics,
+  getPositionHandles,
+  clampPositionEntryPrice,
+  calculateDateRangeMetrics,
   calculateRulerMetrics,
+  getRectangleHandles,
+  isPointNearCircle,
   findNearestCandlePoint,
   isPointNearSegment,
+  getResolutionMs,
+  isPointNearRectangle,
+  isPointNearPath,
+  extrapolateCoordinateToTime,
+  extrapolateTimeToCoordinate,
+  pushDrawingHistory,
+  performDrawingUndo,
+  performDrawingRedo,
+  cloneDrawingObject,
+  reorderDrawingLayer,
+  DEFAULT_FIB_LEVELS,
 } from "@/lib/chart/drawing-math";
+import { DrawingSettingsModal } from "./DrawingSettingsModal";
+import { FavoritesToolbar } from "../terminal/FavoritesToolbar";
 import {
   createChart,
   ColorType,
@@ -67,6 +95,10 @@ interface TradingViewContainerProps {
     low: number;
     volume: number;
   }) => void;
+  favoriteTools?: DrawingToolType[];
+  onToggleFavorite?: (tool: DrawingToolType) => void;
+  showFavoritesBar?: boolean;
+  onToggleFavoritesBar?: () => void;
 }
 
 declare global {
@@ -105,6 +137,10 @@ export function TradingViewContainer({
   trades = [],
   onBarsLoaded,
   onPriceUpdate,
+  favoriteTools = [],
+  onToggleFavorite,
+  showFavoritesBar = false,
+  onToggleFavoritesBar,
 }: TradingViewContainerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartMountRef = useRef<HTMLDivElement>(null);
@@ -125,7 +161,7 @@ export function TradingViewContainer({
   const macdHistSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
-  // Sub-pane configurable parameters (DEC-037 & DEC-038)
+  // Sub-pane & Volume Profile configurable parameters (DEC-037, DEC-038, DEC-071)
   const [rsiPeriod, setRsiPeriod] = useState(14);
   const [rsiOverbought, setRsiOverbought] = useState(70);
   const [rsiOversold, setRsiOversold] = useState(30);
@@ -134,8 +170,11 @@ export function TradingViewContainer({
   const [macdSlow, setMacdSlow] = useState(26);
   const [macdSignal, setMacdSignal] = useState(9);
 
+  const [vpvrRows, setVpvrRows] = useState(24);
+  const [vpvrVaPercent, setVpvrVaPercent] = useState(70);
+
   // Quick settings tuning modal state
-  const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | null>(null);
+  const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | "vpvr" | null>(null);
 
   // Synchronous state refs for callbacks
   const barsRef = useRef<CandlestickBar[]>([]);
@@ -162,13 +201,18 @@ export function TradingViewContainer({
   const [isLoading, setIsLoading] = useState(true);
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [hoveredStats, setHoveredStats] = useState<HoveredStats | null>(null);
+  const [replayState, setReplayState] = useState<ReplayState>("IDLE");
 
-  // Geometric drawing tools state (DEC-040 to DEC-044)
+  // Geometric drawing tools state (DEC-040 to DEC-049)
   const [drawings, setDrawings] = useState<ChartDrawing[]>([]);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [inFlightDrawing, setInFlightDrawing] = useState<ChartDrawing | null>(null);
+  const [inFlightPathPoints, setInFlightPathPoints] = useState<Array<{ time: number; price: number }>>([]);
+  const [inFlightTrendFibPoints, setInFlightTrendFibPoints] = useState<Array<{ time: number; price: number }>>([]);
+  const [inFlightBrushPoints, setInFlightBrushPoints] = useState<Array<{ time: number; price: number }>>([]);
+  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [drawingStep, setDrawingStep] = useState<0 | 1>(0);
-  const [draggedHandle, setDraggedHandle] = useState<"start" | "end" | "body" | null>(null);
+  const [draggedHandle, setDraggedHandle] = useState<string | null>(null);
   const [dragStartPos, setDragStartPos] = useState<{
     x: number;
     y: number;
@@ -176,6 +220,11 @@ export function TradingViewContainer({
     endTime: number;
     startPrice: number;
     endPrice: number;
+    targetPrice?: number;
+    stopPrice?: number;
+    points?: Array<{ time: number; price: number }>;
+    wasStartEarlier?: boolean;
+    wasStartHigher?: boolean;
   } | null>(null);
   const [snappedPoint, setSnappedPoint] = useState<{
     time: number;
@@ -184,7 +233,18 @@ export function TradingViewContainer({
     y: number;
   } | null>(null);
   const [isHoveringDrawing, setIsHoveringDrawing] = useState(false);
+  const [hoveredHandle, setHoveredHandle] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+
+  // Undo / Redo History Engine Refs (DEC-068)
+  const drawingsRef = useRef<ChartDrawing[]>([]);
+  const undoStackRef = useRef<ChartDrawing[][]>([]);
+  const redoStackRef = useRef<ChartDrawing[][]>([]);
+  const preDragDrawingsRef = useRef<ChartDrawing[] | null>(null);
+  const preModalDrawingsRef = useRef<ChartDrawing[] | null>(null);
+  const draggedHandleRef = useRef<string | null>(null);
+  const isSettingsModalOpenRef = useRef(false);
 
   // 1. Check for proprietary TradingView library drop-in
   useEffect(() => {
@@ -678,37 +738,89 @@ export function TradingViewContainer({
       }
     });
 
-    // Replay Engine Listener
+    // Replay Engine Listener (DEC-073)
+    const applyBarsToChartSeries = (targetBars: CandlestickBar[]) => {
+      barsRef.current = targetBars;
+      setBars(targetBars);
+      if (
+        candleSeriesRef.current &&
+        volumeSeriesRef.current &&
+        ema20SeriesRef.current &&
+        ema50SeriesRef.current
+      ) {
+        candleSeriesRef.current.setData(formatCandlestickData(targetBars));
+        volumeSeriesRef.current.setData(formatVolumeData(targetBars));
+        ema20SeriesRef.current.setData(buildEmaLineData(targetBars, 20));
+        ema50SeriesRef.current.setData(buildEmaLineData(targetBars, 50));
+        const bbData = buildBollingerBandsData(targetBars, 20, 2);
+        bbUpperSeriesRef.current?.setData(bbData.upper);
+        bbMiddleSeriesRef.current?.setData(bbData.middle);
+        bbLowerSeriesRef.current?.setData(bbData.lower);
+
+        if (rsiSeriesRef.current) {
+          rsiSeriesRef.current.setData(buildRsiData(targetBars, rsiPeriod));
+        }
+        if (
+          macdLineSeriesRef.current &&
+          macdSignalSeriesRef.current &&
+          macdHistSeriesRef.current
+        ) {
+          const macdData = buildMacdData(targetBars, macdFast, macdSlow, macdSignal);
+          macdLineSeriesRef.current.setData(macdData.macd);
+          macdSignalSeriesRef.current.setData(macdData.signal);
+          macdHistSeriesRef.current.setData(macdData.histogram);
+        }
+      }
+    };
+
     const unsubscribeReplay = replayEngine.subscribe({
-      onTick: (replayBar) => {
+      onStateChange: (newState) => {
+        setReplayState(newState);
+        if (newState === "IDLE" || newState === "SELECTING") {
+          const fullBars = replayEngine.getAllBars() as CandlestickBar[];
+          if (fullBars.length > 0) {
+            applyBarsToChartSeries(fullBars);
+            const last = fullBars[fullBars.length - 1];
+            setCurrentPrice(last.close);
+            onPriceUpdateRef.current?.({
+              price: last.close,
+              change:
+                fullBars[0].open > 0
+                  ? ((last.close - fullBars[0].open) / fullBars[0].open) * 100
+                  : 0,
+              high: Math.max(...fullBars.map((b) => b.high)),
+              low: Math.min(...fullBars.map((b) => b.low)),
+              volume: fullBars.reduce((acc, b) => acc + b.volume, 0),
+            });
+          }
+        }
+      },
+      onTick: (replayBar, _cursorIdx, _totalBars, isForwardStep) => {
         setCurrentPrice(replayBar.close);
         const visibleBars = replayEngine.getVisibleBars() as CandlestickBar[];
-        barsRef.current = visibleBars;
-        setBars(visibleBars);
-        if (
-          candleSeriesRef.current &&
-          volumeSeriesRef.current &&
-          ema20SeriesRef.current &&
-          ema50SeriesRef.current
-        ) {
-          candleSeriesRef.current.setData(formatCandlestickData(visibleBars));
-          volumeSeriesRef.current.setData(formatVolumeData(visibleBars));
-          ema20SeriesRef.current.setData(buildEmaLineData(visibleBars, 20));
-          ema50SeriesRef.current.setData(buildEmaLineData(visibleBars, 50));
-          const bbData = buildBollingerBandsData(visibleBars, 20, 2);
-          bbUpperSeriesRef.current?.setData(bbData.upper);
-          bbMiddleSeriesRef.current?.setData(bbData.middle);
-          bbLowerSeriesRef.current?.setData(bbData.lower);
-
-          if (rsiSeriesRef.current) {
-            rsiSeriesRef.current.setData(buildRsiData(visibleBars, rsiPeriod));
-          }
-          if (macdLineSeriesRef.current && macdSignalSeriesRef.current && macdHistSeriesRef.current) {
-            const macdData = buildMacdData(visibleBars, macdFast, macdSlow, macdSignal);
-            macdLineSeriesRef.current.setData(macdData.macd);
-            macdSignalSeriesRef.current.setData(macdData.signal);
-            macdHistSeriesRef.current.setData(macdData.histogram);
-          }
+        applyBarsToChartSeries(visibleBars);
+        if (visibleBars.length > 0) {
+          onPriceUpdateRef.current?.({
+            price: replayBar.close,
+            change:
+              visibleBars[0].open > 0
+                ? ((replayBar.close - visibleBars[0].open) / visibleBars[0].open) * 100
+                : 0,
+            high: Math.max(...visibleBars.map((b) => b.high)),
+            low: Math.min(...visibleBars.map((b) => b.low)),
+            volume: visibleBars.reduce((acc, b) => acc + b.volume, 0),
+          });
+        }
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("mochex:replay-tick", {
+              detail: {
+                symbol: symbolRef.current,
+                bar: replayBar,
+                isForwardStep: Boolean(isForwardStep),
+              },
+            })
+          );
         }
       },
     });
@@ -925,26 +1037,73 @@ export function TradingViewContainer({
     "#ffffff",
   ];
 
-  // Coordinate Projection Helpers (DEC-040)
-  const timeToCoordinate = useCallback((timeMs: number): number | null => {
-    if (!chartRef.current) return null;
-    const utcSec = toUtcTimestamp(timeMs);
-    const coord = chartRef.current.timeScale().timeToCoordinate(utcSec);
-    return coord !== null ? Number(coord) : null;
+  // Dynamic Bar Spacing & Extrapolation (DEC-045)
+  const getBarSpacingPx = useCallback((): number => {
+    if (chartRef.current) {
+      try {
+        const options = (chartRef.current.timeScale() as any).options?.();
+        if (options && typeof options.barSpacing === "number" && options.barSpacing > 0) {
+          return options.barSpacing;
+        }
+      } catch {}
+    }
+    if (barsRef.current.length >= 2) {
+      const lastBar = barsRef.current[barsRef.current.length - 1];
+      const prevBar = barsRef.current[barsRef.current.length - 2];
+      const x1 = chartRef.current?.timeScale().timeToCoordinate(toUtcTimestamp(prevBar.time));
+      const x2 = chartRef.current?.timeScale().timeToCoordinate(toUtcTimestamp(lastBar.time));
+      if (x1 !== null && x2 !== null && Number(x2) > Number(x1)) {
+        return Number(x2) - Number(x1);
+      }
+    }
+    return 8;
   }, []);
 
-  const coordinateToTime = useCallback((x: number): number | null => {
-    if (!chartRef.current) return null;
-    const t = chartRef.current.timeScale().coordinateToTime(x);
-    if (t !== null && typeof t === "number") {
-      return t * 1000;
-    }
-    if (barsRef.current.length > 0) {
-      if (x <= 0) return barsRef.current[0].time;
-      return barsRef.current[barsRef.current.length - 1].time;
-    }
-    return null;
-  }, []);
+  // Coordinate Projection Helpers (DEC-040 & DEC-045)
+  const timeToCoordinate = useCallback(
+    (timeMs: number): number | null => {
+      if (!chartRef.current) return null;
+      const utcSec = toUtcTimestamp(timeMs);
+      const coord = chartRef.current.timeScale().timeToCoordinate(utcSec);
+      if (coord !== null) return Number(coord);
+
+      // Continuous extrapolation for future whitespace or past history (DEC-045)
+      if (barsRef.current.length > 0) {
+        const lastBar = barsRef.current[barsRef.current.length - 1];
+        const lastX = chartRef.current.timeScale().timeToCoordinate(toUtcTimestamp(lastBar.time));
+        const intervalMs = getResolutionMs(resolutionRef.current);
+        const barSpacing = getBarSpacingPx();
+        if (lastX !== null && barSpacing > 0 && intervalMs > 0) {
+          return extrapolateTimeToCoordinate(timeMs, lastBar.time, Number(lastX), barSpacing, intervalMs);
+        }
+      }
+      return null;
+    },
+    [getBarSpacingPx]
+  );
+
+  const coordinateToTime = useCallback(
+    (x: number): number | null => {
+      if (!chartRef.current) return null;
+      const t = chartRef.current.timeScale().coordinateToTime(x);
+      if (t !== null && typeof t === "number") {
+        return t * 1000;
+      }
+      // Continuous extrapolation for future whitespace or past history (DEC-045)
+      if (barsRef.current.length > 0) {
+        const lastBar = barsRef.current[barsRef.current.length - 1];
+        const lastX = chartRef.current.timeScale().timeToCoordinate(toUtcTimestamp(lastBar.time));
+        const intervalMs = getResolutionMs(resolutionRef.current);
+        const barSpacing = getBarSpacingPx();
+        if (lastX !== null && barSpacing > 0 && intervalMs > 0) {
+          return extrapolateCoordinateToTime(x, lastBar.time, Number(lastX), barSpacing, intervalMs);
+        }
+        return lastBar.time;
+      }
+      return null;
+    },
+    [getBarSpacingPx]
+  );
 
   const priceToCoordinate = useCallback((price: number): number | null => {
     if (!candleSeriesRef.current) return null;
@@ -960,20 +1119,7 @@ export function TradingViewContainer({
 
   const getSafeScreenX = useCallback(
     (timeMs: number): number | null => {
-      const coord = timeToCoordinate(timeMs);
-      if (coord !== null) return coord;
-      if (barsRef.current.length > 1) {
-        const firstBar = barsRef.current[0];
-        const lastBar = barsRef.current[barsRef.current.length - 1];
-        const firstX = timeToCoordinate(firstBar.time);
-        const lastX = timeToCoordinate(lastBar.time);
-        if (firstX !== null && lastX !== null && lastBar.time > firstBar.time) {
-          const pxPerMs = (lastX - firstX) / (lastBar.time - firstBar.time);
-          if (timeMs < firstBar.time) return firstX + (timeMs - firstBar.time) * pxPerMs;
-          if (timeMs > lastBar.time) return lastX + (timeMs - lastBar.time) * pxPerMs;
-        }
-      }
-      return null;
+      return timeToCoordinate(timeMs);
     },
     [timeToCoordinate]
   );
@@ -986,37 +1132,278 @@ export function TradingViewContainer({
     [priceToCoordinate]
   );
 
-  // Symbol-Scoped Persistence (DEC-044)
+  // Notify header of current Undo/Redo stack availability (DEC-068)
+  const notifyHistoryState = useCallback(() => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+      new CustomEvent("mochex:history-state", {
+        detail: {
+          canUndo: undoStackRef.current.length > 0,
+          canRedo: redoStackRef.current.length > 0,
+        },
+      })
+    );
+  }, []);
+
+  const commitHistoryBaseline = useCallback(
+    (baseline: ChartDrawing[], next: ChartDrawing[]) => {
+      const updated = pushDrawingHistory(
+        {
+          undoStack: undoStackRef.current,
+          redoStack: redoStackRef.current,
+          current: baseline,
+        },
+        next,
+        50
+      );
+      undoStackRef.current = updated.undoStack;
+      redoStackRef.current = updated.redoStack;
+      notifyHistoryState();
+    },
+    [notifyHistoryState]
+  );
+
+  // Symbol-Scoped Persistence (DEC-044, DEC-068)
   useEffect(() => {
     if (!symbol) return;
     const storageKey = `mochex:drawings:${symbol}`;
+    let loaded: ChartDrawing[] = [];
     try {
       const saved = localStorage.getItem(storageKey);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          setDrawings(parsed);
-        } else {
-          setDrawings([]);
+          loaded = parsed;
         }
-      } else {
-        setDrawings([]);
       }
-    } catch {
-      setDrawings([]);
-    }
+    } catch {}
+    drawingsRef.current = loaded;
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    preDragDrawingsRef.current = null;
+    preModalDrawingsRef.current = null;
+    setDrawings(loaded);
     setSelectedDrawingId(null);
     setInFlightDrawing(null);
     setDrawingStep(0);
-  }, [symbol]);
+    notifyHistoryState();
+  }, [symbol, notifyHistoryState]);
 
-  const saveDrawings = useCallback((newDrawings: ChartDrawing[]) => {
-    setDrawings(newDrawings);
-    if (!symbolRef.current) return;
-    try {
-      localStorage.setItem(`mochex:drawings:${symbolRef.current}`, JSON.stringify(newDrawings));
-    } catch {}
+  const saveDrawings = useCallback(
+    (newDrawings: ChartDrawing[]) => {
+      if (!draggedHandleRef.current && !isSettingsModalOpenRef.current) {
+        commitHistoryBaseline(drawingsRef.current, newDrawings);
+      }
+      drawingsRef.current = newDrawings;
+      setDrawings(newDrawings);
+      if (!symbolRef.current) return;
+      try {
+        localStorage.setItem(`mochex:drawings:${symbolRef.current}`, JSON.stringify(newDrawings));
+      } catch {}
+    },
+    [commitHistoryBaseline]
+  );
+
+  const handleUndo = useCallback(() => {
+    if (undoStackRef.current.length === 0) return;
+    const nextState = performDrawingUndo({
+      undoStack: undoStackRef.current,
+      redoStack: redoStackRef.current,
+      current: drawingsRef.current,
+    });
+    undoStackRef.current = nextState.undoStack;
+    redoStackRef.current = nextState.redoStack;
+    drawingsRef.current = nextState.current;
+    setDrawings(nextState.current);
+    setSelectedDrawingId((prev) =>
+      prev && nextState.current.some((d) => d.id === prev) ? prev : null
+    );
+    if (symbolRef.current) {
+      try {
+        localStorage.setItem(
+          `mochex:drawings:${symbolRef.current}`,
+          JSON.stringify(nextState.current)
+        );
+      } catch {}
+    }
+    notifyHistoryState();
+  }, [notifyHistoryState]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStackRef.current.length === 0) return;
+    const nextState = performDrawingRedo({
+      undoStack: undoStackRef.current,
+      redoStack: redoStackRef.current,
+      current: drawingsRef.current,
+    });
+    undoStackRef.current = nextState.undoStack;
+    redoStackRef.current = nextState.redoStack;
+    drawingsRef.current = nextState.current;
+    setDrawings(nextState.current);
+    if (symbolRef.current) {
+      try {
+        localStorage.setItem(
+          `mochex:drawings:${symbolRef.current}`,
+          JSON.stringify(nextState.current)
+        );
+      } catch {}
+    }
+    notifyHistoryState();
+  }, [notifyHistoryState]);
+
+  useEffect(() => {
+    isSettingsModalOpenRef.current = isSettingsModalOpen;
+    if (isSettingsModalOpen) {
+      preModalDrawingsRef.current = drawingsRef.current;
+    } else if (preModalDrawingsRef.current !== null) {
+      commitHistoryBaseline(preModalDrawingsRef.current, drawingsRef.current);
+      preModalDrawingsRef.current = null;
+    }
+  }, [isSettingsModalOpen, commitHistoryBaseline]);
+
+  const [activeAlerts, setActiveAlerts] = useState<PriceAlert[]>([]);
+  const [paperAccount, setPaperAccount] = useState<PaperAccountState>(() =>
+    createInitialPaperAccount(100000)
+  );
+
+  useEffect(() => {
+    const loadAlerts = () => {
+      try {
+        const raw = localStorage.getItem("mochex:price_alerts");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) setActiveAlerts(parsed);
+        } else {
+          setActiveAlerts([]);
+        }
+      } catch {}
+    };
+    const loadPaperAccount = () => {
+      try {
+        const raw = localStorage.getItem("mochex:paper_account");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.balance === "number") {
+            setPaperAccount(parsed);
+          }
+        }
+      } catch {}
+    };
+    loadAlerts();
+    loadPaperAccount();
+    window.addEventListener("mochex:alerts-updated", loadAlerts);
+    window.addEventListener("mochex:paper-trading-updated", loadPaperAccount);
+    return () => {
+      window.removeEventListener("mochex:alerts-updated", loadAlerts);
+      window.removeEventListener("mochex:paper-trading-updated", loadPaperAccount);
+    };
   }, []);
+
+  // Broadcast drawings state to Object Tree whenever drawings or selection changes (DEC-070)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+      new CustomEvent("mochex:drawings-sync", {
+        detail: {
+          symbol,
+          drawings,
+          selectedDrawingId,
+        },
+      })
+    );
+  }, [symbol, drawings, selectedDrawingId]);
+
+  useEffect(() => {
+    const handleRequestSync = () => {
+      window.dispatchEvent(
+        new CustomEvent("mochex:drawings-sync", {
+          detail: {
+            symbol: symbolRef.current,
+            drawings: drawingsRef.current,
+            selectedDrawingId,
+          },
+        })
+      );
+    };
+
+    const handleObjectTreeAction = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          action:
+            | "select"
+            | "toggle_hide"
+            | "toggle_lock"
+            | "clone"
+            | "reorder"
+            | "rename"
+            | "open_settings"
+            | "delete";
+          drawingId: string;
+          direction?: "forward" | "backward";
+          name?: string;
+        }>
+      ).detail;
+      if (!detail || !detail.drawingId) return;
+
+      const currentList = drawingsRef.current;
+      const target = currentList.find((d) => d.id === detail.drawingId);
+
+      if (detail.action === "select") {
+        setSelectedDrawingId(detail.drawingId);
+      } else if (detail.action === "toggle_hide" && target) {
+        const nextHidden = !target.isHidden;
+        saveDrawings(
+          currentList.map((d) =>
+            d.id === detail.drawingId ? { ...d, isHidden: nextHidden } : d
+          )
+        );
+        if (nextHidden && selectedDrawingId === detail.drawingId) {
+          setSelectedDrawingId(null);
+        }
+      } else if (detail.action === "toggle_lock" && target) {
+        saveDrawings(
+          currentList.map((d) =>
+            d.id === detail.drawingId ? { ...d, isLocked: !d.isLocked } : d
+          )
+        );
+      } else if (detail.action === "clone" && target) {
+        const cloned = cloneDrawingObject(
+          target,
+          getResolutionMs(resolution) * 3
+        );
+        saveDrawings([...currentList, cloned]);
+        setSelectedDrawingId(cloned.id);
+      } else if (detail.action === "reorder" && detail.direction) {
+        const reordered = reorderDrawingLayer(
+          currentList,
+          detail.drawingId,
+          detail.direction
+        );
+        saveDrawings(reordered);
+      } else if (detail.action === "rename" && target) {
+        saveDrawings(
+          currentList.map((d) =>
+            d.id === detail.drawingId ? { ...d, name: detail.name } : d
+          )
+        );
+      } else if (detail.action === "open_settings" && target) {
+        setSelectedDrawingId(detail.drawingId);
+        setIsSettingsModalOpen(true);
+      } else if (detail.action === "delete" && target && !target.isLocked) {
+        saveDrawings(currentList.filter((d) => d.id !== detail.drawingId));
+        if (selectedDrawingId === detail.drawingId) {
+          setSelectedDrawingId(null);
+        }
+      }
+    };
+
+    window.addEventListener("mochex:request-drawings-sync", handleRequestSync);
+    window.addEventListener("mochex:object-tree-action", handleObjectTreeAction);
+    return () => {
+      window.removeEventListener("mochex:request-drawings-sync", handleRequestSync);
+      window.removeEventListener("mochex:object-tree-action", handleObjectTreeAction);
+    };
+  }, [resolution, selectedDrawingId, saveDrawings]);
 
   useEffect(() => {
     const handleClearDrawings = () => {
@@ -1026,10 +1413,16 @@ export function TradingViewContainer({
       setDrawingStep(0);
     };
     window.addEventListener("mochex:clear-drawings", handleClearDrawings);
-    return () => window.removeEventListener("mochex:clear-drawings", handleClearDrawings);
-  }, [saveDrawings]);
+    window.addEventListener("mochex:undo", handleUndo);
+    window.addEventListener("mochex:redo", handleRedo);
+    return () => {
+      window.removeEventListener("mochex:clear-drawings", handleClearDrawings);
+      window.removeEventListener("mochex:undo", handleUndo);
+      window.removeEventListener("mochex:redo", handleRedo);
+    };
+  }, [saveDrawings, handleUndo, handleRedo]);
 
-  // Specialized Geometric Renderers (DEC-041)
+  // Specialized Geometric Renderers (DEC-041, DEC-046, DEC-047)
   const renderTrendline = useCallback(
     (
       ctx: CanvasRenderingContext2D,
@@ -1037,49 +1430,756 @@ export function TradingViewContainer({
       y1: number,
       x2: number,
       y2: number,
-      color: string,
-      startPrice: number,
-      endPrice: number,
-      startTime: number,
-      endTime: number
+      drawing: ChartDrawing,
+      canvasWidth: number
     ) => {
+      const color = drawing.color || "#2962ff";
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      let startX = x1;
+      let startY = y1;
+      let endX = x2;
+      let endY = y2;
+
+      // Extend lines if configured (DEC-045)
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      if (Math.abs(dx) > 0.001) {
+        const slope = dy / dx;
+        if (drawing.extendRight) {
+          endX = canvasWidth;
+          endY = y1 + slope * (canvasWidth - x1);
+        }
+        if (drawing.extendLeft) {
+          startX = 0;
+          startY = y1 - slope * x1;
+        }
+      }
+
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+
       ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Optional text note
+      if (drawing.text) {
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(drawing.text, x1 + 6, y1 - 6);
+      }
+
+      // Metrics badge if enabled
+      if (drawing.showMetrics !== false) {
+        const deltaPrice = drawing.endPrice - drawing.startPrice;
+        const deltaPercent =
+          drawing.startPrice > 0 ? ((deltaPrice / drawing.startPrice) * 100).toFixed(2) : "0.00";
+        const minTime = Math.min(drawing.startTime, drawing.endTime);
+        const maxTime = Math.max(drawing.startTime, drawing.endTime);
+        const barCount = Math.max(
+          1,
+          barsRef.current.filter((b) => b.time >= minTime && b.time <= maxTime).length
+        );
+        const badgeText = `${deltaPrice >= 0 ? "+" : ""}${deltaPrice.toFixed(2)} (${deltaPrice >= 0 ? "+" : ""}${deltaPercent}%) · ${barCount}b`;
+
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+
+        ctx.font = "10px monospace";
+        const textWidth = ctx.measureText(badgeText).width;
+        const padX = 6;
+        const padY = 3;
+
+        ctx.fillStyle = "rgba(10, 20, 31, 0.85)";
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(midX - textWidth / 2 - padX, midY - 9 - padY, textWidth + padX * 2, 16 + padY * 2, 4);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = deltaPrice >= 0 ? "#00c087" : "#ff3b30";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(badgeText, midX, midY);
+      }
+    },
+    []
+  );
+
+  const renderRectangle = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      drawing: ChartDrawing,
+      canvasWidth: number
+    ) => {
+      const leftX = Math.min(x1, x2);
+      const rightX = drawing.extendRight ? canvasWidth : Math.max(x1, x2);
+      const topY = Math.min(y1, y2);
+      const bottomY = Math.max(y1, y2);
+      const width = rightX - leftX;
+      const height = bottomY - topY;
+
+      const color = drawing.color || "#2962ff";
+      const fillCol = drawing.fillColor || color;
+      const fillOp = drawing.fillOpacity !== undefined ? drawing.fillOpacity : 0.15;
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      // Fill
+      ctx.save();
+      ctx.fillStyle = fillCol;
+      ctx.globalAlpha = fillOp;
+      ctx.fillRect(leftX, topY, width, height);
+      ctx.restore();
+
+      // Border
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+      ctx.strokeRect(leftX, topY, width, height);
+      ctx.setLineDash([]);
+
+      // Optional 50% Equilibrium Line (DEC-060)
+      if (drawing.showMidLine) {
+        const midY = (topY + bottomY) / 2;
+        const midColor = drawing.midLineColor || color;
+        const midStyle = drawing.midLineStyle || "dashed";
+        ctx.save();
+        ctx.strokeStyle = midColor;
+        ctx.lineWidth = lw;
+        if (midStyle === "dashed") ctx.setLineDash([4, 4]);
+        else if (midStyle === "dotted") ctx.setLineDash([2, 2]);
+        else ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(leftX, midY);
+        ctx.lineTo(rightX, midY);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Optional text note with 9-position alignment (DEC-061)
+      if (drawing.text) {
+        ctx.save();
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+
+        const hAlign = drawing.textAlign || "left";
+        const vAlign = drawing.textVAlign || "top";
+
+        let tx = leftX + 8;
+        if (hAlign === "center") {
+          tx = leftX + width / 2;
+          ctx.textAlign = "center";
+        } else if (hAlign === "right") {
+          tx = rightX - 8;
+          ctx.textAlign = "right";
+        } else {
+          ctx.textAlign = "left";
+        }
+
+        let ty = topY + 8;
+        if (vAlign === "middle") {
+          ty = topY + height / 2;
+          ctx.textBaseline = "middle";
+        } else if (vAlign === "bottom") {
+          ty = bottomY - 8;
+          ctx.textBaseline = "bottom";
+        } else {
+          ctx.textBaseline = "top";
+        }
+
+        ctx.fillText(drawing.text, tx, ty);
+        ctx.restore();
+      }
+    },
+    []
+  );
+
+  const renderHorizontalLine = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      y: number,
+      drawing: ChartDrawing,
+      canvasWidth: number
+    ) => {
+      const color = drawing.color || "#2962ff";
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvasWidth, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Scale price badge on right margin (TradingView style)
+      const badgeText = `$${drawing.startPrice.toFixed(2)}`;
+      ctx.font = "10px monospace";
+      const textW = ctx.measureText(badgeText).width;
+      ctx.fillStyle = color;
+      ctx.fillRect(canvasWidth - textW - 12, y - 9, textW + 12, 18);
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(badgeText, canvasWidth - (textW + 12) / 2, y);
+
+      if (drawing.text) {
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(drawing.text, 12, y - 4);
+      }
+    },
+    []
+  );
+
+  const renderVerticalLine = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x: number,
+      drawing: ChartDrawing,
+      canvasHeight: number
+    ) => {
+      const color = drawing.color || "#2962ff";
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvasHeight);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Scale date/time badge on bottom margin (TradingView style)
+      const dStr = new Date(drawing.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      ctx.font = "10px monospace";
+      const textW = ctx.measureText(dStr).width;
+      ctx.fillStyle = color;
+      ctx.fillRect(x - (textW + 10) / 2, canvasHeight - 20, textW + 10, 18);
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(dStr, x, canvasHeight - 11);
+
+      if (drawing.text) {
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(drawing.text, x + 4, 12);
+      }
+    },
+    []
+  );
+
+  const renderPositionBox = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      drawing: ChartDrawing,
+      isLong: boolean
+    ) => {
+      const targetPrice =
+        drawing.targetPrice !== undefined
+          ? drawing.targetPrice
+          : isLong
+          ? drawing.startPrice * 1.04
+          : drawing.startPrice * 0.96;
+      const stopPrice =
+        drawing.stopPrice !== undefined
+          ? drawing.stopPrice
+          : isLong
+          ? drawing.startPrice * 0.98
+          : drawing.startPrice * 1.02;
+
+      const metrics = calculatePositionMetrics(
+        drawing.startPrice,
+        targetPrice,
+        stopPrice,
+        isLong,
+        drawing.accountSize || 10000,
+        drawing.riskPercent || 1.0,
+        drawing.riskAmount
+      );
+      const yEntry = getSafeScreenY(metrics.entryPrice);
+      const yTarget = getSafeScreenY(metrics.targetPrice);
+      const yStop = getSafeScreenY(metrics.stopPrice);
+
+      if (yEntry === null || yTarget === null || yStop === null) return;
+
+      const leftX = Math.min(x1, x2);
+      const boxWidth = Math.max(80, Math.abs(x2 - x1));
+      const rightX = leftX + boxWidth;
+
+      const profitColor = drawing.profitColor || "#089981";
+      const profitOpacity = (drawing.profitOpacity !== undefined ? drawing.profitOpacity : 20) / 100;
+      const stopColor = drawing.stopColor || "#f23636";
+      const stopOpacity = (drawing.stopOpacity !== undefined ? drawing.stopOpacity : 20) / 100;
+      const showLabels = drawing.showLabels !== false;
+
+      // Helper to convert hex to rgba
+      const toRgba = (hexOrRgba: string, alpha: number) => {
+        if (hexOrRgba.startsWith("rgba")) return hexOrRgba;
+        let c = hexOrRgba.replace("#", "");
+        if (c.length === 3) c = c.split("").map((x) => x + x).join("");
+        const num = parseInt(c, 16);
+        if (isNaN(num)) return `rgba(8, 153, 129, ${alpha})`;
+        return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+      };
+
+      // 1. Profit Zone
+      const profitTop = Math.min(yEntry, yTarget);
+      const profitHeight = Math.abs(yTarget - yEntry);
+      ctx.fillStyle = toRgba(profitColor, profitOpacity);
+      ctx.fillRect(leftX, profitTop, boxWidth, profitHeight);
+      ctx.strokeStyle = profitColor;
+      ctx.lineWidth = drawing.lineWidth || 1.5;
+      ctx.strokeRect(leftX, profitTop, boxWidth, profitHeight);
+
+      // 2. Stop Loss Zone
+      const stopTop = Math.min(yEntry, yStop);
+      const stopHeight = Math.abs(yStop - yEntry);
+      ctx.fillStyle = toRgba(stopColor, stopOpacity);
+      ctx.fillRect(leftX, stopTop, boxWidth, stopHeight);
+      ctx.strokeStyle = stopColor;
+      ctx.lineWidth = drawing.lineWidth || 1.5;
+      ctx.strokeRect(leftX, stopTop, boxWidth, stopHeight);
+
+      // 3. Entry Boundary Line
+      ctx.strokeStyle = drawing.color || "#ffffff";
+      ctx.lineWidth = drawing.lineWidth || 1.5;
+      ctx.beginPath();
+      ctx.moveTo(leftX, yEntry);
+      ctx.lineTo(rightX, yEntry);
       ctx.stroke();
 
-      const deltaPrice = endPrice - startPrice;
-      const deltaPercent = startPrice > 0 ? ((deltaPrice / startPrice) * 100).toFixed(2) : "0.00";
-      const minTime = Math.min(startTime, endTime);
-      const maxTime = Math.max(startTime, endTime);
-      const barCount = Math.max(
-        1,
-        barsRef.current.filter((b) => b.time >= minTime && b.time <= maxTime).length
+      if (showLabels) {
+        // 4. Centered Floating TP Card (inside Profit zone)
+        if (profitHeight >= 28 && boxWidth >= 90) {
+          const cardW = Math.min(boxWidth - 12, 190);
+          const cardH = 34;
+          const cardX = leftX + (boxWidth - cardW) / 2;
+          const cardY = profitTop + Math.max(4, (profitHeight - cardH) / 2);
+
+          ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+          ctx.strokeStyle = profitColor;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(cardX, cardY, cardW, cardH, 4);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+
+          // Line 1: Target pts & %
+          ctx.font = "bold 10px monospace";
+          ctx.fillStyle = profitColor;
+          ctx.fillText(
+            `Target: +${metrics.targetDiff.toFixed(2)} (+${Math.abs(metrics.targetPercent).toFixed(2)}%)`,
+            cardX + cardW / 2,
+            cardY + 10
+          );
+
+          // Line 2: TP price & estimated profit
+          ctx.font = "9px monospace";
+          ctx.fillStyle = "#cbd5e1";
+          ctx.fillText(
+            `TP: $${metrics.targetPrice.toFixed(2)} | Profit: +$${metrics.estimatedProfit.toFixed(2)}`,
+            cardX + cardW / 2,
+            cardY + 23
+          );
+        }
+
+        // 5. Centered Floating SL Card (inside Stop Loss zone)
+        if (stopHeight >= 28 && boxWidth >= 90) {
+          const cardW = Math.min(boxWidth - 12, 190);
+          const cardH = 34;
+          const cardX = leftX + (boxWidth - cardW) / 2;
+          const cardY = stopTop + Math.max(4, (stopHeight - cardH) / 2);
+
+          ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+          ctx.strokeStyle = stopColor;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(cardX, cardY, cardW, cardH, 4);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+
+          // Line 1: Stop pts & %
+          ctx.font = "bold 10px monospace";
+          ctx.fillStyle = stopColor;
+          ctx.fillText(
+            `Stop: -${metrics.stopDiff.toFixed(2)} (-${Math.abs(metrics.stopPercent).toFixed(2)}%)`,
+            cardX + cardW / 2,
+            cardY + 10
+          );
+
+          // Line 2: SL price & estimated loss
+          ctx.font = "9px monospace";
+          ctx.fillStyle = "#cbd5e1";
+          ctx.fillText(
+            `SL: $${metrics.stopPrice.toFixed(2)} | Loss: -$${metrics.estimatedLoss.toFixed(2)}`,
+            cardX + cardW / 2,
+            cardY + 23
+          );
+        }
+
+        // 6. Centered Entry Line Badge
+        const entryText = `Entry: $${metrics.entryPrice.toFixed(2)} | R:R ${metrics.riskRewardRatio.toFixed(2)}`;
+        ctx.font = "bold 9px monospace";
+        const entryBadgeW = Math.min(boxWidth - 8, ctx.measureText(entryText).width + 12);
+        const entryBadgeH = 18;
+        const entryBadgeX = leftX + (boxWidth - entryBadgeW) / 2;
+        const entryBadgeY = yEntry - entryBadgeH / 2;
+
+        ctx.fillStyle = "rgba(15, 23, 42, 0.94)";
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(entryBadgeX, entryBadgeY, entryBadgeW, entryBadgeH, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(entryText, leftX + boxWidth / 2, yEntry);
+
+        // 7. Right-Edge Price Level Tags (projecting from rightX)
+        const renderRightTag = (y: number, text: string, bgColor: string) => {
+          ctx.font = "bold 9px monospace";
+          const tw = ctx.measureText(text).width;
+          const tagW = tw + 8;
+          const tagH = 16;
+          const tagX = rightX + 2;
+          const tagY = y - tagH / 2;
+
+          ctx.fillStyle = bgColor;
+          ctx.beginPath();
+          ctx.roundRect(tagX, tagY, tagW, tagH, [0, 3, 3, 0]);
+          ctx.fill();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(text, tagX + 4, y);
+        };
+
+        renderRightTag(yTarget, `TP: $${metrics.targetPrice.toFixed(2)}`, profitColor);
+        renderRightTag(yEntry, `Entry: $${metrics.entryPrice.toFixed(2)}`, "#2962ff");
+        renderRightTag(yStop, `SL: $${metrics.stopPrice.toFixed(2)}`, stopColor);
+      }
+    },
+    [getSafeScreenY]
+  );
+
+  const renderDateRange = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      x2: number,
+      drawing: ChartDrawing,
+      canvasHeight: number
+    ) => {
+      const leftX = Math.min(x1, x2);
+      const rightX = Math.max(x1, x2);
+      const width = rightX - leftX;
+
+      const metrics = calculateDateRangeMetrics(
+        drawing.startTime,
+        drawing.endTime,
+        barsRef.current
       );
-      const badgeText = `${deltaPrice >= 0 ? "+" : ""}${deltaPrice.toFixed(2)} (${deltaPrice >= 0 ? "+" : ""}${deltaPercent}%) · ${barCount}b`;
 
-      const midX = (x1 + x2) / 2;
-      const midY = (y1 + y2) / 2;
+      // Translucent highlighted band
+      ctx.fillStyle = drawing.fillColor || "rgba(41, 98, 255, 0.08)";
+      ctx.fillRect(leftX, 0, width, canvasHeight);
 
+      ctx.strokeStyle = drawing.color || "#2962ff";
+      ctx.lineWidth = drawing.lineWidth || 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(leftX, 0);
+      ctx.lineTo(leftX, canvasHeight);
+      ctx.moveTo(rightX, 0);
+      ctx.lineTo(rightX, canvasHeight);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Telemetry badge
+      const badgeText = `${metrics.barCount} bars · ${metrics.formattedDuration}`;
       ctx.font = "10px monospace";
-      const textWidth = ctx.measureText(badgeText).width;
-      const padX = 6;
-      const padY = 3;
+      const textW = ctx.measureText(badgeText).width + 16;
+      const midX = leftX + width / 2;
+      const midY = canvasHeight / 2;
 
-      ctx.fillStyle = "rgba(10, 20, 31, 0.85)";
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+      ctx.fillStyle = "rgba(10, 20, 31, 0.9)";
+      ctx.strokeStyle = drawing.color || "#2962ff";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(midX - textWidth / 2 - padX, midY - 9 - padY, textWidth + padX * 2, 16 + padY * 2, 4);
+      ctx.roundRect(midX - textW / 2, midY - 11, textW, 22, 4);
       ctx.fill();
       ctx.stroke();
 
-      ctx.fillStyle = deltaPrice >= 0 ? "#00c087" : "#ff3b30";
+      ctx.fillStyle = "#00d8ff";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(badgeText, midX, midY);
+    },
+    []
+  );
+
+  const renderCircle = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      drawing: ChartDrawing
+    ) => {
+      const radius = Math.hypot(x2 - x1, y2 - y1);
+      const color = drawing.color || "#2962ff";
+      const fillCol = drawing.fillColor || color;
+      const fillOp = drawing.fillOpacity !== undefined ? drawing.fillOpacity : 0.15;
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      ctx.save();
+      ctx.fillStyle = fillCol;
+      ctx.globalAlpha = fillOp;
+      ctx.beginPath();
+      ctx.arc(x1, y1, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(x1, y1, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (drawing.text) {
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(drawing.text, x1, y1);
+      }
+    },
+    []
+  );
+
+  const renderTrendFib = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      points: Array<{ time: number; price: number }>,
+      drawing: ChartDrawing,
+      canvasWidth: number
+    ) => {
+      if (points.length < 3) return;
+      const [p1, p2, p3] = points;
+      const x1 = getSafeScreenX(p1.time);
+      const y1 = getSafeScreenY(p1.price);
+      const x2 = getSafeScreenX(p2.time);
+      const y2 = getSafeScreenY(p2.price);
+      const x3 = getSafeScreenX(p3.time);
+      const y3 = getSafeScreenY(p3.price);
+
+      if (x1 === null || y1 === null || x2 === null || y2 === null || x3 === null || y3 === null) return;
+
+      // Wave 1 and Wave 2 connecting lines
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x3, y3);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Extension levels projected from P3
+      const extLevels = calculateTrendFibLevels(p1.price, p2.price, p3.price, drawing.fibLevels);
+      const rightX = drawing.extendRight ? canvasWidth : Math.max(x3 + 120, canvasWidth * 0.9);
+
+      extLevels.forEach((lvl) => {
+        const y = getSafeScreenY(lvl.price);
+        if (y === null) return;
+
+        ctx.strokeStyle = lvl.color;
+        ctx.lineWidth = lvl.ratio === 1.0 || lvl.ratio === 1.618 ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(x3, y);
+        ctx.lineTo(rightX, y);
+        ctx.stroke();
+
+        const label = `${lvl.ratio} ($${lvl.price.toFixed(2)})`;
+        ctx.font = "10px monospace";
+        ctx.fillStyle = lvl.color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(label, x3 + 4, y - 2);
+      });
+    },
+    [getSafeScreenX, getSafeScreenY]
+  );
+
+  const renderGannBox = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      drawing: ChartDrawing
+    ) => {
+      const leftX = Math.min(x1, x2);
+      const rightX = Math.max(x1, x2);
+      const topY = Math.min(y1, y2);
+      const bottomY = Math.max(y1, y2);
+      const w = rightX - leftX;
+      const h = bottomY - topY;
+
+      const { priceLevels, timeLevels } = calculateGannBoxLevels(
+        drawing.startPrice,
+        drawing.endPrice,
+        drawing.startTime,
+        drawing.endTime,
+        drawing.gannPriceLevels,
+        drawing.gannTimeLevels
+      );
+
+      ctx.fillStyle = "rgba(41, 98, 255, 0.05)";
+      ctx.fillRect(leftX, topY, w, h);
+
+      ctx.strokeStyle = drawing.color || "#2962ff";
+      ctx.lineWidth = drawing.lineWidth || 1.5;
+      ctx.strokeRect(leftX, topY, w, h);
+
+      priceLevels.forEach((lvl) => {
+        const y = getSafeScreenY(lvl.price);
+        if (y === null) return;
+        ctx.strokeStyle = lvl.color || (lvl.ratio === 0.5 ? "rgba(0, 216, 255, 0.6)" : "rgba(255, 255, 255, 0.15)");
+        ctx.lineWidth = lvl.ratio === 0.5 ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(leftX, y);
+        ctx.lineTo(rightX, y);
+        ctx.stroke();
+      });
+
+      timeLevels.forEach((lvl) => {
+        const x = getSafeScreenX(lvl.time);
+        if (x === null) return;
+        ctx.strokeStyle = lvl.color || (lvl.ratio === 0.5 ? "rgba(0, 216, 255, 0.6)" : "rgba(255, 255, 255, 0.15)");
+        ctx.lineWidth = lvl.ratio === 0.5 ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(x, topY);
+        ctx.lineTo(x, bottomY);
+        ctx.stroke();
+      });
+
+      // Diagonal angle rays (DEC-059)
+      if (drawing.showGannAngles !== false) {
+        ctx.strokeStyle = drawing.gannAnglesColor || "rgba(245, 172, 55, 0.6)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(leftX, topY);
+        ctx.lineTo(rightX, bottomY);
+        ctx.moveTo(leftX, bottomY);
+        ctx.lineTo(rightX, topY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    },
+    [getSafeScreenX, getSafeScreenY]
+  );
+
+  const renderPath = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      points: Array<{ x: number; y: number }>,
+      drawing: ChartDrawing,
+      isSelected: boolean
+    ) => {
+      if (points.length < 2) return;
+      const color = drawing.color || "#2962ff";
+      const lw = drawing.lineWidth || 2;
+      const style = drawing.lineStyle || "solid";
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      if (style === "dashed") ctx.setLineDash([4, 4]);
+      else if (style === "dotted") ctx.setLineDash([2, 2]);
+      else ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Node handles
+      points.forEach((p) => {
+        ctx.fillStyle = isSelected ? "#ffffff" : color;
+        ctx.strokeStyle = isSelected ? color : "#ffffff";
+        ctx.lineWidth = isSelected ? 2 : 1;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, isSelected ? 4.5 : 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+
+      if (drawing.text && points.length > 0) {
+        ctx.font = `${drawing.fontSize || 11}px monospace`;
+        ctx.fillStyle = color;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(drawing.text, points[0].x + 6, points[0].y - 6);
+      }
     },
     []
   );
@@ -1091,21 +2191,27 @@ export function TradingViewContainer({
       y1: number,
       x2: number,
       y2: number,
-      startPrice: number,
-      endPrice: number
+      drawing: ChartDrawing,
+      canvasWidth: number
     ) => {
-      const levels = calculateFibLevels(startPrice, endPrice);
-      const leftX = Math.min(x1, x2);
-      const rightX = Math.max(x1, x2) + 60;
+      const levels = calculateFibLevels(drawing.startPrice, drawing.endPrice, drawing.fibLevels);
+      const leftX = drawing.extendLeft ? 0 : Math.min(x1, x2);
+      const rightX = drawing.extendRight ? canvasWidth : Math.max(x1, x2) + 60;
 
-      for (let i = 0; i < levels.length - 1; i++) {
-        const lvlA = levels[i];
-        const lvlB = levels[i + 1];
-        const yA = getSafeScreenY(lvlA.price);
-        const yB = getSafeScreenY(lvlB.price);
-        if (yA !== null && yB !== null) {
-          ctx.fillStyle = lvlB.bg;
-          ctx.fillRect(leftX, Math.min(yA, yB), rightX - leftX, Math.abs(yB - yA));
+      if (drawing.showBackground !== false) {
+        const bgOpacity = drawing.fillOpacity !== undefined ? drawing.fillOpacity : 0.08;
+        for (let i = 0; i < levels.length - 1; i++) {
+          const lvlA = levels[i];
+          const lvlB = levels[i + 1];
+          const yA = getSafeScreenY(lvlA.price);
+          const yB = getSafeScreenY(lvlB.price);
+          if (yA !== null && yB !== null) {
+            ctx.save();
+            ctx.globalAlpha = bgOpacity;
+            ctx.fillStyle = lvlB.bg || "rgba(41, 98, 255, 0.08)";
+            ctx.fillRect(leftX, Math.min(yA, yB), rightX - leftX, Math.abs(yB - yA));
+            ctx.restore();
+          }
         }
       }
 
@@ -1134,91 +2240,6 @@ export function TradingViewContainer({
         ctx.textBaseline = "bottom";
         ctx.fillText(label, leftX + 4, y - 2);
       });
-    },
-    [getSafeScreenY]
-  );
-
-  const renderPosition = useCallback(
-    (
-      ctx: CanvasRenderingContext2D,
-      x1: number,
-      y1: number,
-      x2: number,
-      y2: number,
-      startPrice: number,
-      endPrice: number
-    ) => {
-      const metrics = calculatePositionMetrics(startPrice, endPrice);
-      const yEntry = getSafeScreenY(metrics.entryPrice);
-      const yTarget = getSafeScreenY(metrics.targetPrice);
-      const yStop = getSafeScreenY(metrics.stopPrice);
-
-      if (yEntry === null || yTarget === null || yStop === null) return;
-
-      const leftX = Math.min(x1, x2);
-      const boxWidth = Math.max(80, Math.abs(x2 - x1));
-      const rightX = leftX + boxWidth;
-
-      // Profit Zone
-      const profitTop = Math.min(yEntry, yTarget);
-      const profitHeight = Math.abs(yTarget - yEntry);
-      ctx.fillStyle = "rgba(0, 192, 135, 0.15)";
-      ctx.fillRect(leftX, profitTop, boxWidth, profitHeight);
-      ctx.strokeStyle = "rgba(0, 192, 135, 0.85)";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(leftX, profitTop, boxWidth, profitHeight);
-
-      ctx.font = "10px monospace";
-      ctx.fillStyle = "#00c087";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.fillText(
-        `Target: +${Math.abs(metrics.targetPercent).toFixed(2)}% ($${metrics.targetPrice.toFixed(2)})`,
-        leftX + 6,
-        profitTop + 4
-      );
-
-      // Stop Zone
-      const stopTop = Math.min(yEntry, yStop);
-      const stopHeight = Math.abs(yStop - yEntry);
-      ctx.fillStyle = "rgba(255, 59, 48, 0.15)";
-      ctx.fillRect(leftX, stopTop, boxWidth, stopHeight);
-      ctx.strokeStyle = "rgba(255, 59, 48, 0.85)";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(leftX, stopTop, boxWidth, stopHeight);
-
-      ctx.fillStyle = "#ff3b30";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "bottom";
-      ctx.fillText(
-        `Stop: -${Math.abs(metrics.stopPercent).toFixed(2)}% ($${metrics.stopPrice.toFixed(2)})`,
-        leftX + 6,
-        stopTop + stopHeight - 4
-      );
-
-      // Entry line & R:R badge
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(leftX, yEntry);
-      ctx.lineTo(rightX, yEntry);
-      ctx.stroke();
-
-      const rrText = `R:R ${metrics.riskRewardRatio.toFixed(2)}`;
-      ctx.font = "10px monospace";
-      const badgeW = ctx.measureText(rrText).width + 12;
-      ctx.fillStyle = "#0a141f";
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(leftX + (boxWidth - badgeW) / 2, yEntry - 9, badgeW, 18, 4);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(rrText, leftX + boxWidth / 2, yEntry);
     },
     [getSafeScreenY]
   );
@@ -1290,19 +2311,23 @@ export function TradingViewContainer({
   const renderBrush = useCallback(
     (
       ctx: CanvasRenderingContext2D,
-      x1: number,
-      y1: number,
-      x2: number,
-      y2: number,
-      color: string
+      points: Array<{ x: number; y: number }>,
+      color: string,
+      lineWidth = 2.5
     ) => {
+      if (points.length < 2) return;
+      ctx.save();
       ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
+      ctx.lineWidth = lineWidth;
       ctx.lineCap = "round";
+      ctx.lineJoin = "round";
       ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
       ctx.stroke();
+      ctx.restore();
     },
     []
   );
@@ -1336,18 +2361,149 @@ export function TradingViewContainer({
   const renderHandles = useCallback(
     (
       ctx: CanvasRenderingContext2D,
+      drawing: ChartDrawing,
       x1: number,
       y1: number,
       x2: number,
-      y2: number
+      y2: number,
+      pathPoints?: Array<{ x: number; y: number }>
     ) => {
-      const handles = [
+      // 1. Rectangle 8 handles (DEC-052)
+      if (drawing.type === "rectangle") {
+        const handles = getRectangleHandles(x1, y1, x2, y2);
+        handles.forEach((h) => {
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#2962ff";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, h.type.includes("m") ? 3.5 : 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        return;
+      }
+
+      // 2. Position tools 3 handles (Target, Stop, Width)
+      if (drawing.type === "long_position" || drawing.type === "short_position") {
+        const isLong = drawing.type === "long_position";
+        const targetPrice =
+          drawing.targetPrice !== undefined
+            ? drawing.targetPrice
+            : isLong
+            ? drawing.startPrice * 1.04
+            : drawing.startPrice * 0.96;
+        const stopPrice =
+          drawing.stopPrice !== undefined
+            ? drawing.stopPrice
+            : isLong
+            ? drawing.startPrice * 0.98
+            : drawing.startPrice * 1.02;
+
+        const yTarget = getSafeScreenY(targetPrice);
+        const yStop = getSafeScreenY(stopPrice);
+        const yEntry = y1;
+        const leftX = Math.min(x1, x2);
+        const boxWidth = Math.max(80, Math.abs(x2 - x1));
+        const midX = leftX + boxWidth / 2;
+        const rightX = leftX + boxWidth;
+
+        const handles = [
+          { x: midX, y: yTarget !== null ? yTarget : y2, fill: "#00c087", stroke: "#ffffff" },
+          { x: midX, y: yStop !== null ? yStop : y1, fill: "#ff3b30", stroke: "#ffffff" },
+          { x: rightX, y: yEntry, fill: "#ffffff", stroke: "#2962ff" },
+          { x: midX, y: yEntry, fill: "#ffffff", stroke: "#2962ff" },
+        ];
+
+        handles.forEach((h) => {
+          ctx.fillStyle = h.fill;
+          ctx.strokeStyle = h.stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        return;
+      }
+
+      // 3. Circle 2 handles (Center + Radius)
+      if (drawing.type === "circle") {
+        const handles = [
+          { x: x1, y: y1, fill: "#2962ff", stroke: "#ffffff" },
+          { x: x2, y: y2, fill: "#ffffff", stroke: "#2962ff" },
+        ];
+        handles.forEach((h) => {
+          ctx.fillStyle = h.fill;
+          ctx.strokeStyle = h.stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        return;
+      }
+
+      // 4. Date Range handles (Left & Right boundary midpoints)
+      if (drawing.type === "date_range") {
+        const midY = (y1 + y2) / 2;
+        [{ x: x1, y: midY }, { x: x2, y: midY }].forEach((h) => {
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#2962ff";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        return;
+      }
+
+      // 5. Horizontal Line & Vertical Line center handles
+      if (drawing.type === "horizontal_line") {
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "#2962ff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc((x1 + x2) / 2, y1, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        return;
+      }
+
+      if (drawing.type === "vertical_line") {
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "#2962ff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x1, (y1 + y2) / 2, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        return;
+      }
+
+      // 6. Path or Trend-Based Fib node points
+      if (pathPoints && pathPoints.length > 0) {
+        pathPoints.forEach((p) => {
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#2962ff";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
+        return;
+      }
+
+      // 7. Default 2-point handles
+      const defaultHandles = [
         { x: x1, y: y1, r: 4.5, fill: "#ffffff", stroke: "#2962ff" },
         { x: x2, y: y2, r: 4.5, fill: "#ffffff", stroke: "#2962ff" },
         { x: (x1 + x2) / 2, y: (y1 + y2) / 2, r: 3.5, fill: "#2962ff", stroke: "#ffffff" },
       ];
 
-      handles.forEach((h) => {
+      defaultHandles.forEach((h) => {
         ctx.fillStyle = h.fill;
         ctx.strokeStyle = h.stroke;
         ctx.lineWidth = 2;
@@ -1357,22 +2513,236 @@ export function TradingViewContainer({
         ctx.stroke();
       });
     },
-    []
+    [getSafeScreenY]
   );
 
-  // Hit-Testing for Selection & Handle Dragging (DEC-043)
+  // Hit-Testing for Selection & Handle Dragging (DEC-043, DEC-046, DEC-047, DEC-052 to DEC-056)
   const getHitTestResult = useCallback(
     (x: number, y: number) => {
       if (isDrawingsHidden || drawings.length === 0) return null;
 
       for (let i = drawings.length - 1; i >= 0; i--) {
         const d = drawings[i];
+        if (d.isHidden) continue;
+
+        // 1. Path or Brush multi-point hit testing (DEC-047, DEC-063)
+        if ((d.type === "path" || d.type === "brush") && d.points && d.points.length > 0) {
+          const screenPts = d.points
+            .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+            .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+
+          if (d.type === "path") {
+            for (let pIdx = 0; pIdx < screenPts.length; pIdx++) {
+              if (Math.hypot(x - screenPts[pIdx].x, y - screenPts[pIdx].y) <= 9) {
+                return { drawing: d, handle: `node_${pIdx}` };
+              }
+            }
+          }
+
+          if (isPointNearPath(x, y, screenPts, 10)) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        // 2. Trend-Based Fib Extension 3-point hit testing (DEC-055)
+        if (d.type === "trend_fib" && d.points && d.points.length > 0) {
+          const screenPts = d.points
+            .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+            .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+
+          for (let pIdx = 0; pIdx < screenPts.length; pIdx++) {
+            if (Math.hypot(x - screenPts[pIdx].x, y - screenPts[pIdx].y) <= 9) {
+              return { drawing: d, handle: `node_${pIdx}` };
+            }
+          }
+
+          if (
+            screenPts.length >= 2 &&
+            isPointNearSegment(x, y, screenPts[0].x, screenPts[0].y, screenPts[1].x, screenPts[1].y, 8)
+          ) {
+            return { drawing: d, handle: "body" as const };
+          }
+
+          if (screenPts.length >= 3) {
+            if (
+              isPointNearSegment(x, y, screenPts[1].x, screenPts[1].y, screenPts[2].x, screenPts[2].y, 8)
+            ) {
+              return { drawing: d, handle: "body" as const };
+            }
+            const extLevels = calculateTrendFibLevels(
+              d.points[0].price,
+              d.points[1].price,
+              d.points[2].price,
+              d.fibLevels
+            );
+            for (const lvl of extLevels) {
+              const ly = getSafeScreenY(lvl.price);
+              if (ly !== null && Math.abs(y - ly) <= 6 && x >= screenPts[2].x) {
+                return { drawing: d, handle: "body" as const };
+              }
+            }
+          }
+          continue;
+        }
+
         const x1 = getSafeScreenX(d.startTime);
         const y1 = getSafeScreenY(d.startPrice);
         const x2 = getSafeScreenX(d.endTime);
         const y2 = getSafeScreenY(d.endPrice);
-        if (x1 === null || y1 === null || x2 === null || y2 === null) continue;
+        if (x1 === null || y1 === null) continue;
 
+        // 3. Horizontal Line & Vertical Line infinite hit testing (DEC-054)
+        if (d.type === "horizontal_line") {
+          const midX = x2 !== null ? (x1 + x2) / 2 : x1;
+          if (Math.hypot(x - midX, y - y1) <= 9) {
+            return { drawing: d, handle: "h_center" };
+          }
+          if (Math.abs(y - y1) <= 8) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        if (d.type === "vertical_line") {
+          const midY = y2 !== null ? (y1 + y2) / 2 : y1;
+          if (Math.hypot(x - x1, y - midY) <= 9) {
+            return { drawing: d, handle: "v_center" };
+          }
+          if (Math.abs(x - x1) <= 8) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        if (x2 === null || y2 === null) continue;
+
+        // 4. Rectangle 8 handles hit testing (DEC-052, DEC-062)
+        if (d.type === "rectangle") {
+          const handles = getRectangleHandles(x1, y1, x2, y2);
+          for (const h of handles) {
+            if (Math.hypot(x - h.x, y - h.y) <= 9) {
+              return { drawing: d, handle: h.type };
+            }
+          }
+          const canvasW = drawingCanvasRef.current?.getBoundingClientRect().width || 2000;
+          if (isPointNearRectangle(x, y, x1, y1, x2, y2, !!d.extendRight, canvasW, 8)) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        // 5. Position tools handles (Target, Stop, Width) (DEC-054)
+        if (d.type === "long_position" || d.type === "short_position") {
+          const isLong = d.type === "long_position";
+          const targetPrice =
+            d.targetPrice !== undefined
+              ? d.targetPrice
+              : isLong
+              ? d.startPrice * 1.04
+              : d.startPrice * 0.96;
+          const stopPrice =
+            d.stopPrice !== undefined
+              ? d.stopPrice
+              : isLong
+              ? d.startPrice * 0.98
+              : d.startPrice * 1.02;
+          const yTarget = getSafeScreenY(targetPrice);
+          const yStop = getSafeScreenY(stopPrice);
+          const leftX = Math.min(x1, x2);
+          const boxWidth = Math.max(80, Math.abs(x2 - x1));
+          const midX = leftX + boxWidth / 2;
+          const rightX = leftX + boxWidth;
+
+          if (yTarget !== null && Math.hypot(x - midX, y - yTarget) <= 9) {
+            return { drawing: d, handle: "pos_target" };
+          }
+          if (yStop !== null && Math.hypot(x - midX, y - yStop) <= 9) {
+            return { drawing: d, handle: "pos_stop" };
+          }
+          if (Math.hypot(x - rightX, y - y1) <= 9) {
+            return { drawing: d, handle: "pos_width" };
+          }
+          if (Math.hypot(x - midX, y - y1) <= 9) {
+            return { drawing: d, handle: "pos_entry" };
+          }
+          if (yTarget !== null && yStop !== null) {
+            const minY = Math.min(y1, yTarget, yStop);
+            const maxY = Math.max(y1, yTarget, yStop);
+            if (x >= leftX && x <= rightX && y >= minY && y <= maxY) {
+              return { drawing: d, handle: "body" as const };
+            }
+          }
+          continue;
+        }
+
+        // 6. Circle handles (Center + Radius perimeter)
+        if (d.type === "circle") {
+          if (Math.hypot(x - x1, y - y1) <= 9) {
+            return { drawing: d, handle: "circle_center" };
+          }
+          if (Math.hypot(x - x2, y - y2) <= 9) {
+            return { drawing: d, handle: "circle_radius" };
+          }
+          const radius = Math.hypot(x2 - x1, y2 - y1);
+          if (isPointNearCircle(x, y, x1, y1, radius, 8)) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        // 7. Date Range handles (Left & Right boundary midpoints)
+        if (d.type === "date_range") {
+          const midY = (y1 + y2) / 2;
+          if (Math.hypot(x - x1, y - midY) <= 9) {
+            return { drawing: d, handle: "dr_start" };
+          }
+          if (Math.hypot(x - x2, y - midY) <= 9) {
+            return { drawing: d, handle: "dr_end" };
+          }
+          const minX = Math.min(x1, x2);
+          const maxX = Math.max(x1, x2);
+          if (x >= minX && x <= maxX) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        // 8. Gann Box handles (4 corners)
+        if (d.type === "gann_box") {
+          if (Math.hypot(x - x1, y - y1) <= 9) return { drawing: d, handle: "start" as const };
+          if (Math.hypot(x - x2, y - y2) <= 9) return { drawing: d, handle: "end" as const };
+          if (Math.hypot(x - x1, y - y2) <= 9) return { drawing: d, handle: "gann_bl" };
+          if (Math.hypot(x - x2, y - y1) <= 9) return { drawing: d, handle: "gann_tr" };
+          const minX = Math.min(x1, x2);
+          const maxX = Math.max(x1, x2);
+          const minY = Math.min(y1, y2);
+          const maxY = Math.max(y1, y2);
+          if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+            return { drawing: d, handle: "body" as const };
+          }
+          continue;
+        }
+
+        // 9. Fibonacci Retracement handles and levels (DEC-050)
+        if (d.type === "fibonacci") {
+          if (Math.hypot(x - x1, y - y1) <= 9) return { drawing: d, handle: "start" as const };
+          if (Math.hypot(x - x2, y - y2) <= 9) return { drawing: d, handle: "end" as const };
+          const levels = calculateFibLevels(d.startPrice, d.endPrice, d.fibLevels);
+          const minX = d.extendLeft ? 0 : Math.min(x1, x2);
+          const maxX = d.extendRight ? (drawingCanvasRef.current?.width || 2000) : Math.max(x1, x2) + 60;
+          if (x >= minX - 4 && x <= maxX + 4) {
+            for (const lvl of levels) {
+              const ly = getSafeScreenY(lvl.price);
+              if (ly !== null && Math.abs(y - ly) <= 6) {
+                return { drawing: d, handle: "body" as const };
+              }
+            }
+          }
+          continue;
+        }
+
+        // 10. Default 2-point handles and segment check (trendline, brush, text)
         if (Math.hypot(x - x1, y - y1) <= 9) {
           return { drawing: d, handle: "start" as const };
         }
@@ -1385,49 +2755,14 @@ export function TradingViewContainer({
           return { drawing: d, handle: "body" as const };
         }
 
-        if (d.type === "position") {
-          const metrics = calculatePositionMetrics(d.startPrice, d.endPrice);
-          const yTarget = getSafeScreenY(metrics.targetPrice);
-          const yStop = getSafeScreenY(metrics.stopPrice);
-          if (yTarget !== null && yStop !== null) {
-            const minY = Math.min(y1, yTarget, yStop);
-            const maxY = Math.max(y1, yTarget, yStop);
-            const minX = Math.min(x1, x2);
-            const maxX = minX + Math.max(80, Math.abs(x2 - x1));
-            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-              return { drawing: d, handle: "body" as const };
-            }
-          }
-        } else if (d.type === "ruler") {
-          const minX = Math.min(x1, x2);
-          const maxX = Math.max(x1, x2);
-          const minY = Math.min(y1, y2);
-          const maxY = Math.max(y1, y2);
-          if (x >= minX - 4 && x <= maxX + 4 && y >= minY - 4 && y <= maxY + 4) {
-            return { drawing: d, handle: "body" as const };
-          }
-        } else if (d.type === "fibonacci") {
-          const levels = calculateFibLevels(d.startPrice, d.endPrice);
-          const minX = Math.min(x1, x2);
-          const maxX = Math.max(x1, x2) + 60;
-          if (x >= minX - 4 && x <= maxX + 4) {
-            for (const lvl of levels) {
-              const ly = getSafeScreenY(lvl.price);
-              if (ly !== null && Math.abs(y - ly) <= 6) {
-                return { drawing: d, handle: "body" as const };
-              }
-            }
-          }
-        } else {
-          if (isPointNearSegment(x, y, x1, y1, x2, y2, 8)) {
-            return { drawing: d, handle: "body" as const };
-          }
+        if (isPointNearSegment(x, y, x1, y1, x2, y2, 8)) {
+          return { drawing: d, handle: "body" as const };
         }
       }
 
       return null;
     },
-    [isDrawingsHidden, drawings, getSafeScreenX, getSafeScreenY]
+    [isDrawingsHidden, drawings, getSafeScreenX, getSafeScreenY, timeToCoordinate, priceToCoordinate]
   );
 
   const renderDrawingCanvas = useCallback(() => {
@@ -1451,59 +2786,438 @@ export function TradingViewContainer({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044)
+    // 0. Render Visible Range Volume Profile (VPVR) if enabled (DEC-071)
+    const showVpvr = activeIndicators.some(
+      (ind) =>
+        ind.toLowerCase().includes("volume profile") ||
+        ind.toLowerCase().includes("poc")
+    );
+    if (showVpvr && barsRef.current.length > 0) {
+      let visibleBars = barsRef.current;
+      try {
+        const timeRange = chartRef.current?.timeScale().getVisibleRange();
+        if (timeRange && timeRange.from && timeRange.to) {
+          const fromMs = Number(timeRange.from) * 1000;
+          const toMs = Number(timeRange.to) * 1000;
+          const filtered = barsRef.current.filter(
+            (b) => b.time >= fromMs && b.time <= toMs
+          );
+          if (filtered.length >= 5) {
+            visibleBars = filtered;
+          }
+        }
+      } catch {}
+
+      const vpvr = calculateVisibleVolumeProfile(
+        visibleBars,
+        vpvrRows,
+        vpvrVaPercent / 100
+      );
+      if (vpvr && vpvr.maxBucketVolume > 0) {
+        const rightEdgeX = Math.max(100, rect.width - 68);
+        const maxBarWidth = Math.min(180, rect.width * 0.22);
+
+        ctx.save();
+        // Draw each horizontal volume bucket (Buy + Sell stacked from right edge leftward)
+        for (const bucket of vpvr.buckets) {
+          const yTop = getSafeScreenY(bucket.priceHigh);
+          const yBot = getSafeScreenY(bucket.priceLow);
+          if (yTop === null || yBot === null) continue;
+
+          const top = Math.min(yTop, yBot);
+          const height = Math.max(2, Math.abs(yBot - yTop) - 1);
+          const totalWidth =
+            (bucket.totalVolume / vpvr.maxBucketVolume) * maxBarWidth;
+          const buyWidth =
+            bucket.totalVolume > 0
+              ? (bucket.buyVolume / bucket.totalVolume) * totalWidth
+              : 0;
+          const sellWidth = Math.max(0, totalWidth - buyWidth);
+
+          const alpha = bucket.isPoc ? 0.58 : bucket.isValueArea ? 0.36 : 0.15;
+
+          // Sell portion (anchored on the right)
+          ctx.fillStyle = `rgba(255, 59, 48, ${alpha})`;
+          ctx.fillRect(rightEdgeX - sellWidth, top, sellWidth, height);
+
+          // Buy portion (stacked to the left of sell portion)
+          ctx.fillStyle = `rgba(0, 192, 135, ${alpha})`;
+          ctx.fillRect(
+            rightEdgeX - sellWidth - buyWidth,
+            top,
+            buyWidth,
+            height
+          );
+
+          if (bucket.isPoc) {
+            ctx.strokeStyle = "#f59e0b";
+            ctx.lineWidth = 1.25;
+            ctx.strokeRect(
+              rightEdgeX - totalWidth,
+              top,
+              totalWidth,
+              height
+            );
+          }
+        }
+
+        // Draw VAH, VAL, and POC horizontal reference lines & tags
+        const drawVpvrLevel = (
+          price: number,
+          label: string,
+          color: string,
+          dashed: boolean
+        ) => {
+          const y = getSafeScreenY(price);
+          if (y === null || y < 0 || y > rect.height) return;
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = dashed ? 1.1 : 1.6;
+          if (dashed) ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(Math.max(0, rightEdgeX - maxBarWidth - 60), y);
+          ctx.lineTo(rightEdgeX, y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          const fmt = price >= 1 ? price.toFixed(2) : price.toFixed(4);
+          const tagText = `${label} $${fmt}`;
+          ctx.font = "bold 9px monospace";
+          const tw = ctx.measureText(tagText).width + 8;
+          const tx = Math.max(8, rightEdgeX - maxBarWidth - tw - 6);
+          ctx.fillStyle = "rgba(10, 20, 31, 0.9)";
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(tx, y - 8, tw, 16, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = color;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(tagText, tx + 4, y + 0.5);
+          ctx.restore();
+        };
+
+        drawVpvrLevel(vpvr.vahPrice, "VAH", "#2962ff", true);
+        drawVpvrLevel(vpvr.valPrice, "VAL", "#2962ff", true);
+        drawVpvrLevel(vpvr.pocPrice, "POC", "#f59e0b", false);
+
+        ctx.restore();
+      }
+    }
+
+    // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044 & DEC-070)
     if (!isDrawingsHidden) {
       drawings.forEach((d) => {
+        if (d.isHidden) return;
+        if (d.type === "path" && d.points && d.points.length > 0) {
+          const screenPts = d.points
+            .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+            .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+          renderPath(ctx, screenPts, d, d.id === selectedDrawingId);
+          if (d.id === selectedDrawingId) {
+            renderHandles(ctx, d, 0, 0, 0, 0, screenPts);
+          }
+          return;
+        }
+
+        if (d.type === "trend_fib" && d.points && d.points.length > 0) {
+          renderTrendFib(ctx, d.points, d, rect.width);
+          if (d.id === selectedDrawingId) {
+            const screenPts = d.points
+              .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+              .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+            renderHandles(ctx, d, 0, 0, 0, 0, screenPts);
+          }
+          return;
+        }
+
         const x1 = getSafeScreenX(d.startTime);
         const y1 = getSafeScreenY(d.startPrice);
         const x2 = getSafeScreenX(d.endTime);
         const y2 = getSafeScreenY(d.endPrice);
-        if (x1 === null || y1 === null || x2 === null || y2 === null) return;
+        if (x1 === null || y1 === null) return;
 
+        const validX2 = x2 !== null ? x2 : x1;
+        const validY2 = y2 !== null ? y2 : y1;
         const color = d.color || "#2962ff";
+
         if (d.type === "trendline") {
-          renderTrendline(ctx, x1, y1, x2, y2, color, d.startPrice, d.endPrice, d.startTime, d.endTime);
+          renderTrendline(ctx, x1, y1, validX2, validY2, d, rect.width);
+        } else if (d.type === "horizontal_line") {
+          renderHorizontalLine(ctx, y1, d, rect.width);
+        } else if (d.type === "vertical_line") {
+          renderVerticalLine(ctx, x1, d, rect.height);
+        } else if (d.type === "rectangle") {
+          renderRectangle(ctx, x1, y1, validX2, validY2, d, rect.width);
+        } else if (d.type === "circle") {
+          renderCircle(ctx, x1, y1, validX2, validY2, d);
+        } else if (d.type === "date_range") {
+          renderDateRange(ctx, x1, validX2, d, rect.height);
+        } else if (d.type === "long_position") {
+          renderPositionBox(ctx, x1, y1, validX2, d, true);
+        } else if (d.type === "short_position") {
+          renderPositionBox(ctx, x1, y1, validX2, d, false);
+        } else if (d.type === "gann_box") {
+          renderGannBox(ctx, x1, y1, validX2, validY2, d);
         } else if (d.type === "fibonacci") {
-          renderFibonacci(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice);
-        } else if (d.type === "position") {
-          renderPosition(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice);
-        } else if (d.type === "ruler") {
-          renderRuler(ctx, x1, y1, x2, y2, d.startPrice, d.endPrice, d.startTime, d.endTime);
+          renderFibonacci(ctx, x1, y1, validX2, validY2, d, rect.width);
         } else if (d.type === "brush") {
-          renderBrush(ctx, x1, y1, x2, y2, color);
+          const screenPts = (d.points || [
+            { time: d.startTime, price: d.startPrice },
+            { time: d.endTime, price: d.endPrice },
+          ])
+            .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+            .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+          renderBrush(ctx, screenPts, color, d.lineWidth || 2.5);
         } else if (d.type === "text") {
           renderText(ctx, x1, y1, d.text || "Note", color);
         }
 
         if (d.id === selectedDrawingId) {
-          renderHandles(ctx, x1, y1, x2, y2);
+          renderHandles(ctx, d, x1, y1, validX2, validY2);
+        }
+
+        // Render active alert bell badge on alert-linked drawings (DEC-069)
+        const hasLinkedAlert = activeAlerts.some(
+          (a) => a.drawingId === d.id && a.symbol === symbol && a.active
+        );
+        if (hasLinkedAlert) {
+          ctx.save();
+          const badgeText = "🔔 ALERT";
+          ctx.font = "bold 9px monospace";
+          const tw = ctx.measureText(badgeText).width;
+          const bx = Math.max(8, x1);
+          const by = Math.max(18, y1 - 22);
+          ctx.fillStyle = "rgba(245, 158, 11, 0.92)";
+          ctx.strokeStyle = "#fbbf24";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(bx, by, tw + 10, 16, 3);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "#0a141f";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(badgeText, bx + 5, by + 8);
+          ctx.restore();
         }
       });
     }
 
+    // 1.5 Render Active Standalone Price Alerts on Canvas (DEC-069)
+    if (!isDrawingsHidden && activeAlerts.length > 0) {
+      activeAlerts
+        .filter((a) => a.symbol === symbol && a.active && !a.drawingId)
+        .forEach((alert) => {
+          const ay = getSafeScreenY(alert.targetPrice);
+          if (ay === null || ay < 0 || ay > rect.height) return;
+          ctx.save();
+          ctx.strokeStyle = "#f59e0b";
+          ctx.lineWidth = 1.25;
+          ctx.setLineDash([5, 5]);
+          ctx.beginPath();
+          ctx.moveTo(0, ay);
+          ctx.lineTo(rect.width, ay);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          const priceFormatted =
+            alert.targetPrice >= 1
+              ? alert.targetPrice.toFixed(2)
+              : alert.targetPrice.toFixed(4);
+          const tagText = `🔔 $${priceFormatted}`;
+          ctx.font = "bold 10px monospace";
+          const tagW = ctx.measureText(tagText).width + 12;
+          const tagH = 18;
+          const tagX = Math.max(8, rect.width - tagW - 72);
+          const tagY = ay - tagH / 2;
+
+          ctx.fillStyle = "rgba(245, 158, 11, 0.95)";
+          ctx.strokeStyle = "#fbbf24";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(tagX, tagY, tagW, tagH, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = "#0a141f";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(tagText, tagX + 6, ay + 0.5);
+          ctx.restore();
+        });
+    }
+
+    // 1.6 Render Active Paper Positions & Working Limit Orders on Canvas (DEC-072)
+    if (!isDrawingsHidden) {
+      const symbolPositions = paperAccount.positions.filter((p) => p.symbol === symbol);
+      const symbolOrders = paperAccount.orders.filter((o) => o.symbol === symbol);
+
+      const drawOrderOrBracketLine = (
+        price: number,
+        badgeText: string,
+        strokeColor: string,
+        fillBg: string,
+        textColor: string,
+        dashed: boolean
+      ) => {
+        const py = getSafeScreenY(price);
+        if (py === null || py < 0 || py > rect.height) return;
+        ctx.save();
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = dashed ? 1.25 : 1.75;
+        if (dashed) ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, py);
+        ctx.lineTo(rect.width, py);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.font = "bold 10px monospace";
+        const tagW = ctx.measureText(badgeText).width + 14;
+        const tagH = 18;
+        const tagX = 14;
+        const tagY = py - tagH / 2;
+
+        ctx.fillStyle = fillBg;
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(tagX, tagY, tagW, tagH, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = textColor;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(badgeText, tagX + 7, py + 0.5);
+        ctx.restore();
+      };
+
+      symbolPositions.forEach((pos) => {
+        const mark = currentPrice && currentPrice > 0 ? currentPrice : pos.entryPrice;
+        const pnl = calculatePositionUnrealizedPnl(pos, mark);
+        const sign = pnl.unrealizedPnl >= 0 ? "+" : "";
+        const entryFmt = pos.entryPrice >= 1 ? pos.entryPrice.toFixed(2) : pos.entryPrice.toFixed(4);
+        const sideColor = pos.side === "long" ? "#00c087" : "#ff3b30";
+        const pnlStr = `${sign}$${pnl.unrealizedPnl.toFixed(2)} (${sign}${pnl.roePercent.toFixed(1)}%)`;
+
+        drawOrderOrBracketLine(
+          pos.entryPrice,
+          `${pos.side.toUpperCase()} ${pos.leverage}x @ $${entryFmt} · ${pnlStr}`,
+          sideColor,
+          "rgba(10, 20, 31, 0.94)",
+          sideColor,
+          false
+        );
+
+        if (pos.takeProfit && pos.takeProfit > 0) {
+          const tpFmt = pos.takeProfit >= 1 ? pos.takeProfit.toFixed(2) : pos.takeProfit.toFixed(4);
+          drawOrderOrBracketLine(
+            pos.takeProfit,
+            `TP (${pos.side.toUpperCase()}) @ $${tpFmt}`,
+            "#00c087",
+            "rgba(0, 192, 135, 0.16)",
+            "#00c087",
+            true
+          );
+        }
+
+        if (pos.stopLoss && pos.stopLoss > 0) {
+          const slFmt = pos.stopLoss >= 1 ? pos.stopLoss.toFixed(2) : pos.stopLoss.toFixed(4);
+          drawOrderOrBracketLine(
+            pos.stopLoss,
+            `SL (${pos.side.toUpperCase()}) @ $${slFmt}`,
+            "#ff3b30",
+            "rgba(255, 59, 48, 0.16)",
+            "#ff3b30",
+            true
+          );
+        }
+      });
+
+      symbolOrders.forEach((ord) => {
+        const limFmt = ord.limitPrice >= 1 ? ord.limitPrice.toFixed(2) : ord.limitPrice.toFixed(4);
+        drawOrderOrBracketLine(
+          ord.limitPrice,
+          `LIMIT ${ord.side.toUpperCase()} ${ord.leverage}x @ $${limFmt}`,
+          "#00d8ff",
+          "rgba(10, 20, 31, 0.92)",
+          "#00d8ff",
+          true
+        );
+      });
+    }
+
     // 2. Render in-flight active drawing tool preview
-    if (inFlightDrawing && !isDrawingsHidden) {
+    if (activeDrawingTool === "path" && inFlightPathPoints.length > 0 && !isDrawingsHidden) {
+      const previewPts = inFlightPathPoints
+        .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+        .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+      if (mousePos) {
+        previewPts.push(mousePos);
+      }
+      renderPath(ctx, previewPts, { type: "path", color: "#b6c4ff", lineWidth: 2 } as any, false);
+    } else if (activeDrawingTool === "brush" && inFlightBrushPoints.length > 0 && !isDrawingsHidden) {
+      const previewPts = inFlightBrushPoints
+        .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+        .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+      renderBrush(ctx, previewPts, "#b6c4ff", 2.5);
+    } else if (activeDrawingTool === "trend_fib" && inFlightTrendFibPoints.length > 0 && !isDrawingsHidden) {
+      const previewPts = [...inFlightTrendFibPoints];
+      if (mousePos) {
+        const mouseTime =
+          coordinateToTime(mousePos.x) ||
+          (barsRef.current.length > 0
+            ? barsRef.current[barsRef.current.length - 1].time
+            : Date.now());
+        const mousePrice = coordinateToPrice(mousePos.y) || currentPrice || 0;
+        previewPts.push({ time: mouseTime, price: mousePrice });
+      }
+      renderTrendFib(
+        ctx,
+        previewPts,
+        { type: "trend_fib", color: "#b6c4ff", lineWidth: 1.5, fibLevels: DEFAULT_FIB_LEVELS } as any,
+        rect.width
+      );
+    } else if (inFlightDrawing && !isDrawingsHidden) {
       const x1 = getSafeScreenX(inFlightDrawing.startTime);
       const y1 = getSafeScreenY(inFlightDrawing.startPrice);
       const x2 = getSafeScreenX(inFlightDrawing.endTime);
       const y2 = getSafeScreenY(inFlightDrawing.endPrice);
 
-      if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
+      if (x1 !== null && y1 !== null) {
+        const validX2 = x2 !== null ? x2 : x1;
+        const validY2 = y2 !== null ? y2 : y1;
         const color = inFlightDrawing.color || "#b6c4ff";
         ctx.save();
         ctx.globalAlpha = 0.85;
 
         if (inFlightDrawing.type === "trendline") {
           ctx.setLineDash([4, 4]);
-          renderTrendline(ctx, x1, y1, x2, y2, color, inFlightDrawing.startPrice, inFlightDrawing.endPrice, inFlightDrawing.startTime, inFlightDrawing.endTime);
+          renderTrendline(ctx, x1, y1, validX2, validY2, inFlightDrawing, rect.width);
+        } else if (inFlightDrawing.type === "horizontal_line") {
+          renderHorizontalLine(ctx, y1, inFlightDrawing, rect.width);
+        } else if (inFlightDrawing.type === "vertical_line") {
+          renderVerticalLine(ctx, x1, inFlightDrawing, rect.height);
+        } else if (inFlightDrawing.type === "rectangle") {
+          ctx.setLineDash([4, 4]);
+          renderRectangle(ctx, x1, y1, validX2, validY2, inFlightDrawing, rect.width);
+        } else if (inFlightDrawing.type === "circle") {
+          renderCircle(ctx, x1, y1, validX2, validY2, inFlightDrawing);
+        } else if (inFlightDrawing.type === "date_range") {
+          renderDateRange(ctx, x1, validX2, inFlightDrawing, rect.height);
+        } else if (inFlightDrawing.type === "long_position") {
+          renderPositionBox(ctx, x1, y1, validX2, inFlightDrawing, true);
+        } else if (inFlightDrawing.type === "short_position") {
+          renderPositionBox(ctx, x1, y1, validX2, inFlightDrawing, false);
+        } else if (inFlightDrawing.type === "gann_box") {
+          renderGannBox(ctx, x1, y1, validX2, validY2, inFlightDrawing);
         } else if (inFlightDrawing.type === "fibonacci") {
-          renderFibonacci(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice);
-        } else if (inFlightDrawing.type === "position") {
-          renderPosition(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice);
-        } else if (inFlightDrawing.type === "ruler") {
-          renderRuler(ctx, x1, y1, x2, y2, inFlightDrawing.startPrice, inFlightDrawing.endPrice, inFlightDrawing.startTime, inFlightDrawing.endTime);
-        } else if (inFlightDrawing.type === "brush") {
-          renderBrush(ctx, x1, y1, x2, y2, color);
+          renderFibonacci(ctx, x1, y1, validX2, validY2, inFlightDrawing, rect.width);
         } else if (inFlightDrawing.type === "text") {
           renderText(ctx, x1, y1, "Note", color);
         }
@@ -1512,7 +3226,15 @@ export function TradingViewContainer({
     }
 
     // 3. Smart Magnet Snapping Indicator (DEC-042)
-    if (snappedPoint && isMagnetActive && (isDrawing || drawingStep === 1 || activeDrawingTool !== "none")) {
+    if (
+      snappedPoint &&
+      isMagnetActive &&
+      (isDrawing ||
+        drawingStep === 1 ||
+        inFlightPathPoints.length > 0 ||
+        inFlightTrendFibPoints.length > 0 ||
+        activeDrawingTool !== "none")
+    ) {
       ctx.save();
       ctx.strokeStyle = "#00d8ff";
       ctx.fillStyle = "rgba(0, 216, 255, 0.25)";
@@ -1531,23 +3253,101 @@ export function TradingViewContainer({
       ctx.restore();
     }
 
+    // 4. Interactive Bar Replay Scissor-Cut ("Jump to Bar") Overlay (DEC-073)
+    if (replayState === "SELECTING" && mousePos) {
+      const cutX = snappedPoint ? snappedPoint.x : mousePos.x;
+      const cutTime =
+        (snappedPoint ? snappedPoint.time : coordinateToTime(cutX)) ||
+        (barsRef.current.length > 0
+          ? barsRef.current[barsRef.current.length - 1].time
+          : Date.now());
+
+      ctx.save();
+      // Dimmed Future Bars Curtain to the right of the scissor line
+      if (cutX < rect.width) {
+        ctx.fillStyle = "rgba(6, 14, 23, 0.62)";
+        ctx.fillRect(cutX, 0, rect.width - cutX, rect.height);
+      }
+
+      // Vertical Scissor-Cut Line
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(cutX, 0);
+      ctx.lineTo(cutX, rect.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Floating Scissor-Cut Timestamp Pill Badge
+      const dStr = new Date(cutTime).toLocaleString("en-US", {
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      const label = `✂ CUT HERE · ${dStr}`;
+      ctx.font = "bold 10px monospace";
+      const tw = ctx.measureText(label).width + 16;
+      const th = 22;
+      const bx = Math.max(8, Math.min(rect.width - tw - 8, cutX - tw / 2));
+      const by = 52;
+
+      ctx.fillStyle = "rgba(245, 158, 11, 0.96)";
+      ctx.strokeStyle = "#fbbf24";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, tw, th, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#0a141f";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, bx + tw / 2, by + th / 2 + 0.5);
+      ctx.restore();
+    }
+
     ctx.restore();
   }, [
     drawings,
+    activeAlerts,
+    paperAccount,
+    currentPrice,
+    replayState,
+    activeIndicators,
+    vpvrRows,
+    vpvrVaPercent,
+    symbol,
     selectedDrawingId,
     inFlightDrawing,
+    inFlightPathPoints,
+    inFlightTrendFibPoints,
+    inFlightBrushPoints,
     isDrawingsHidden,
     snappedPoint,
     isMagnetActive,
     isDrawing,
     drawingStep,
     activeDrawingTool,
+    mousePos,
+    coordinateToTime,
     getSafeScreenX,
     getSafeScreenY,
+    timeToCoordinate,
+    priceToCoordinate,
     renderTrendline,
+    renderHorizontalLine,
+    renderVerticalLine,
+    renderRectangle,
+    renderCircle,
+    renderDateRange,
+    renderPositionBox,
+    renderTrendFib,
+    renderGannBox,
+    renderPath,
     renderFibonacci,
-    renderPosition,
-    renderRuler,
     renderBrush,
     renderText,
     renderHandles,
@@ -1575,13 +3375,42 @@ export function TradingViewContainer({
     renderDrawingCanvas();
   }, [renderDrawingCanvas]);
 
-  // Keyboard shortcut listener (Delete/Backspace to remove, Escape to cancel)
+  // Keyboard shortcut listener (Delete/Backspace to remove, Enter to finish path, Escape to cancel)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         document.activeElement instanceof HTMLInputElement ||
         document.activeElement instanceof HTMLTextAreaElement
       ) {
+        return;
+      }
+
+      // Undo / Redo keyboard shortcuts (DEC-068)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      // Clone / Duplicate selected drawing shortcut (DEC-070)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        if (selectedDrawingId) {
+          e.preventDefault();
+          const target = drawings.find((d) => d.id === selectedDrawingId);
+          if (target) {
+            const cloned = cloneDrawingObject(target, getResolutionMs(resolution) * 3);
+            saveDrawings([...drawings, cloned]);
+            setSelectedDrawingId(cloned.id);
+          }
+        }
         return;
       }
 
@@ -1593,8 +3422,41 @@ export function TradingViewContainer({
             setSelectedDrawingId(null);
           }
         }
+      } else if (e.key === "Enter") {
+        if (activeDrawingTool === "path" && inFlightPathPoints.length >= 2) {
+          const finishedDrawing: ChartDrawing = {
+            id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            type: "path",
+            points: [...inFlightPathPoints],
+            startTime: inFlightPathPoints[0].time,
+            endTime: inFlightPathPoints[inFlightPathPoints.length - 1].time,
+            startPrice: inFlightPathPoints[0].price,
+            endPrice: inFlightPathPoints[inFlightPathPoints.length - 1].price,
+            color: "#2962ff",
+            lineWidth: 2,
+            lineStyle: "solid",
+            isLocked: isDrawingsLocked || false,
+          };
+          saveDrawings([...drawings, finishedDrawing]);
+          setSelectedDrawingId(finishedDrawing.id);
+          setInFlightPathPoints([]);
+          setMousePos(null);
+          onSelectDrawingTool?.("none");
+        }
       } else if (e.key === "Escape") {
-        if (inFlightDrawing) {
+        if (inFlightPathPoints.length > 0) {
+          setInFlightPathPoints([]);
+          setMousePos(null);
+          onSelectDrawingTool?.("none");
+        } else if (inFlightTrendFibPoints.length > 0) {
+          setInFlightTrendFibPoints([]);
+          setMousePos(null);
+          onSelectDrawingTool?.("none");
+        } else if (inFlightBrushPoints.length > 0) {
+          setInFlightBrushPoints([]);
+          setIsDrawing(false);
+          onSelectDrawingTool?.("none");
+        } else if (inFlightDrawing) {
           setInFlightDrawing(null);
           setDrawingStep(0);
           setIsDrawing(false);
@@ -1613,12 +3475,18 @@ export function TradingViewContainer({
     selectedDrawingId,
     drawings,
     inFlightDrawing,
+    inFlightPathPoints,
+    inFlightTrendFibPoints,
+    inFlightBrushPoints,
     activeDrawingTool,
+    isDrawingsLocked,
     onSelectDrawingTool,
     saveDrawings,
+    handleUndo,
+    handleRedo,
   ]);
 
-  // Mouse handlers for drawing overlay (DEC-042)
+  // Mouse handlers for drawing overlay (DEC-042 to DEC-056)
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = drawingCanvasRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -1647,7 +3515,197 @@ export function TradingViewContainer({
       }
     }
 
-    // 1. Tool placement workflow
+    // 0. Interactive Bar Replay Scissor-Cut Click (DEC-073)
+    if (replayState === "SELECTING") {
+      replayEngine.setCutoffTime(effectiveTime);
+      setMousePos(null);
+      return;
+    }
+
+    // 1. Path Drawing Tool: multi-click vertex placement (DEC-047)
+    if (activeDrawingTool === "path") {
+      if (e.detail === 2 && inFlightPathPoints.length >= 2) {
+        const finishedDrawing: ChartDrawing = {
+          id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          type: "path",
+          points: [...inFlightPathPoints],
+          startTime: inFlightPathPoints[0].time,
+          endTime: inFlightPathPoints[inFlightPathPoints.length - 1].time,
+          startPrice: inFlightPathPoints[0].price,
+          endPrice: inFlightPathPoints[inFlightPathPoints.length - 1].price,
+          color: "#2962ff",
+          lineWidth: 2,
+          lineStyle: "solid",
+          isLocked: isDrawingsLocked || false,
+        };
+        saveDrawings([...drawings, finishedDrawing]);
+        setSelectedDrawingId(finishedDrawing.id);
+        setInFlightPathPoints([]);
+        setMousePos(null);
+        onSelectDrawingTool?.("none");
+        return;
+      }
+
+      setInFlightPathPoints((prev) => [...prev, { time: effectiveTime, price: effectivePrice }]);
+      return;
+    }
+
+    // 2. Trend-Based Fib Extension: 3-point progressive placement (DEC-055)
+    if (activeDrawingTool === "trend_fib") {
+      const currentPts = [...inFlightTrendFibPoints, { time: effectiveTime, price: effectivePrice }];
+      if (currentPts.length === 3) {
+        const finishedDrawing: ChartDrawing = {
+          id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          type: "trend_fib",
+          points: currentPts,
+          startTime: currentPts[0].time,
+          endTime: currentPts[2].time,
+          startPrice: currentPts[0].price,
+          endPrice: currentPts[2].price,
+          color: "#2962ff",
+          lineWidth: 1.5,
+          lineStyle: "solid",
+          fibLevels: DEFAULT_FIB_LEVELS,
+          isLocked: isDrawingsLocked || false,
+        };
+        saveDrawings([...drawings, finishedDrawing]);
+        setSelectedDrawingId(finishedDrawing.id);
+        setInFlightTrendFibPoints([]);
+        setMousePos(null);
+        onSelectDrawingTool?.("none");
+      } else {
+        setInFlightTrendFibPoints(currentPts);
+      }
+      return;
+    }
+
+    // 3. 1-Click Drop Tools (DEC-054): horizontal_line, vertical_line, long_position, short_position, text
+    if (activeDrawingTool === "horizontal_line") {
+      const newDrawing: ChartDrawing = {
+        id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: "horizontal_line",
+        startTime: effectiveTime,
+        startPrice: effectivePrice,
+        endTime: effectiveTime + 86400000,
+        endPrice: effectivePrice,
+        color: "#2962ff",
+        lineWidth: 1.5,
+        lineStyle: "solid",
+        isLocked: isDrawingsLocked || false,
+      };
+      saveDrawings([...drawings, newDrawing]);
+      setSelectedDrawingId(newDrawing.id);
+      onSelectDrawingTool?.("none");
+      return;
+    }
+
+    if (activeDrawingTool === "vertical_line") {
+      const newDrawing: ChartDrawing = {
+        id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: "vertical_line",
+        startTime: effectiveTime,
+        startPrice: effectivePrice,
+        endTime: effectiveTime,
+        endPrice: effectivePrice,
+        color: "#2962ff",
+        lineWidth: 1.5,
+        lineStyle: "solid",
+        isLocked: isDrawingsLocked || false,
+      };
+      saveDrawings([...drawings, newDrawing]);
+      setSelectedDrawingId(newDrawing.id);
+      onSelectDrawingTool?.("none");
+      return;
+    }
+
+    if (activeDrawingTool === "long_position") {
+      const target = effectivePrice * 1.04;
+      const stop = effectivePrice * 0.98;
+      const timeSpan = 20 * 60000 * (resolution === "1D" ? 1440 : 15);
+      const newDrawing: ChartDrawing = {
+        id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: "long_position",
+        startTime: effectiveTime,
+        startPrice: effectivePrice,
+        endTime: effectiveTime + timeSpan,
+        endPrice: target,
+        targetPrice: target,
+        stopPrice: stop,
+        color: "#ffffff",
+        lineWidth: 1.5,
+        profitColor: "#089981",
+        profitOpacity: 20,
+        stopColor: "#f23636",
+        stopOpacity: 20,
+        accountSize: 10000,
+        riskPercent: 1.0,
+        showLabels: true,
+        isLocked: isDrawingsLocked || false,
+      };
+      saveDrawings([...drawings, newDrawing]);
+      setSelectedDrawingId(newDrawing.id);
+      onSelectDrawingTool?.("none");
+      return;
+    }
+
+    if (activeDrawingTool === "short_position") {
+      const target = effectivePrice * 0.96;
+      const stop = effectivePrice * 1.02;
+      const timeSpan = 20 * 60000 * (resolution === "1D" ? 1440 : 15);
+      const newDrawing: ChartDrawing = {
+        id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: "short_position",
+        startTime: effectiveTime,
+        startPrice: effectivePrice,
+        endTime: effectiveTime + timeSpan,
+        endPrice: target,
+        targetPrice: target,
+        stopPrice: stop,
+        color: "#ffffff",
+        lineWidth: 1.5,
+        profitColor: "#089981",
+        profitOpacity: 20,
+        stopColor: "#f23636",
+        stopOpacity: 20,
+        accountSize: 10000,
+        riskPercent: 1.0,
+        showLabels: true,
+        isLocked: isDrawingsLocked || false,
+      };
+      saveDrawings([...drawings, newDrawing]);
+      setSelectedDrawingId(newDrawing.id);
+      onSelectDrawingTool?.("none");
+      return;
+    }
+
+    if (activeDrawingTool === "text") {
+      const newDrawing: ChartDrawing = {
+        id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: "text",
+        startTime: effectiveTime,
+        startPrice: effectivePrice,
+        endTime: effectiveTime,
+        endPrice: effectivePrice,
+        text: "Note",
+        fontSize: 12,
+        color: "#2962ff",
+        lineWidth: 1,
+        isLocked: isDrawingsLocked || false,
+      };
+      saveDrawings([...drawings, newDrawing]);
+      setSelectedDrawingId(newDrawing.id);
+      onSelectDrawingTool?.("none");
+      return;
+    }
+
+    // 3.5. Freehand Brush Stroke Start (DEC-063)
+    if (activeDrawingTool === "brush") {
+      setInFlightBrushPoints([{ time: effectiveTime, price: effectivePrice }]);
+      setIsDrawing(true);
+      return;
+    }
+
+    // 4. Standard 2-Point Drawing Tools (trendline, rectangle, circle, date_range, gann_box, fibonacci)
     if (activeDrawingTool !== "none" && activeDrawingTool !== "crosshair") {
       if (drawingStep === 0) {
         const newDrawing: ChartDrawing = {
@@ -1658,6 +3716,11 @@ export function TradingViewContainer({
           endTime: effectiveTime,
           endPrice: effectivePrice,
           color: "#2962ff",
+          fillColor: activeDrawingTool === "rectangle" ? "#2962ff" : undefined,
+          fillOpacity: activeDrawingTool === "rectangle" ? 0.15 : undefined,
+          lineWidth: 2,
+          lineStyle: "solid",
+          fibLevels: activeDrawingTool === "fibonacci" ? DEFAULT_FIB_LEVELS : undefined,
           isLocked: isDrawingsLocked || false,
         };
         setInFlightDrawing(newDrawing);
@@ -1688,11 +3751,33 @@ export function TradingViewContainer({
       return;
     }
 
-    // 2. Selection & handle dragging workflow
+    // 5. Selection & handle dragging workflow (DEC-062)
     const hit = getHitTestResult(x, y);
     if (hit) {
       setSelectedDrawingId(hit.drawing.id);
       if (!hit.drawing.isLocked && !isDrawingsLocked) {
+        const wasStartEarlier = hit.drawing.startTime <= hit.drawing.endTime;
+        const wasStartHigher = hit.drawing.startPrice >= hit.drawing.endPrice;
+        const isLong = hit.drawing.type === "long_position";
+        const currentTargetPrice =
+          hit.drawing.targetPrice !== undefined
+            ? hit.drawing.targetPrice
+            : hit.drawing.type === "long_position" || hit.drawing.type === "short_position"
+            ? isLong
+              ? hit.drawing.startPrice * 1.04
+              : hit.drawing.startPrice * 0.96
+            : undefined;
+        const currentStopPrice =
+          hit.drawing.stopPrice !== undefined
+            ? hit.drawing.stopPrice
+            : hit.drawing.type === "long_position" || hit.drawing.type === "short_position"
+            ? isLong
+              ? hit.drawing.startPrice * 0.98
+              : hit.drawing.startPrice * 1.02
+            : undefined;
+
+        preDragDrawingsRef.current = drawingsRef.current;
+        draggedHandleRef.current = hit.handle;
         setDraggedHandle(hit.handle);
         setDragStartPos({
           x,
@@ -1701,10 +3786,16 @@ export function TradingViewContainer({
           endTime: hit.drawing.endTime,
           startPrice: hit.drawing.startPrice,
           endPrice: hit.drawing.endPrice,
+          targetPrice: currentTargetPrice,
+          stopPrice: currentStopPrice,
+          points: hit.drawing.points ? [...hit.drawing.points] : undefined,
+          wasStartEarlier,
+          wasStartHigher,
         });
       }
     } else {
       setSelectedDrawingId(null);
+      draggedHandleRef.current = null;
       setDraggedHandle(null);
       setDragStartPos(null);
     }
@@ -1743,6 +3834,20 @@ export function TradingViewContainer({
       setSnappedPoint(null);
     }
 
+    if (
+      activeDrawingTool === "path" ||
+      activeDrawingTool === "trend_fib" ||
+      replayState === "SELECTING"
+    ) {
+      setMousePos({ x, y });
+    }
+
+    // Brush freehand streaming (DEC-063)
+    if (activeDrawingTool === "brush" && inFlightBrushPoints.length > 0) {
+      setInFlightBrushPoints((prev) => [...prev, { time: effectiveTime, price: effectivePrice }]);
+      return;
+    }
+
     if (drawingStep === 1 && inFlightDrawing) {
       setInFlightDrawing((prev) =>
         prev ? { ...prev, endTime: effectiveTime, endPrice: effectivePrice } : null
@@ -1753,6 +3858,210 @@ export function TradingViewContainer({
     if (draggedHandle && selectedDrawingId && dragStartPos) {
       const drawing = drawings.find((d) => d.id === selectedDrawingId);
       if (drawing && !drawing.isLocked && !isDrawingsLocked) {
+        // 1. Node handles for path or trend_fib
+        if (draggedHandle.startsWith("node_")) {
+          const nodeIdx = parseInt(draggedHandle.replace("node_", ""), 10);
+          if (drawing.points && !isNaN(nodeIdx) && drawing.points[nodeIdx]) {
+            const updatedPoints = [...drawing.points];
+            updatedPoints[nodeIdx] = { time: effectiveTime, price: effectivePrice };
+            saveDrawings(
+              drawings.map((d) =>
+                d.id === selectedDrawingId
+                  ? {
+                      ...d,
+                      points: updatedPoints,
+                      startTime: updatedPoints[0]?.time ?? d.startTime,
+                      endTime: updatedPoints[updatedPoints.length - 1]?.time ?? d.endTime,
+                      startPrice: updatedPoints[0]?.price ?? d.startPrice,
+                      endPrice: updatedPoints[updatedPoints.length - 1]?.price ?? d.endPrice,
+                    }
+                  : d
+              )
+            );
+          }
+          return;
+        }
+
+        // 2. Rectangle 8 handles (DEC-052, DEC-062)
+        if (draggedHandle.startsWith("rect_")) {
+          const hType = draggedHandle.replace("rect_", "");
+          let sT = drawing.startTime;
+          let eT = drawing.endTime;
+          let sP = drawing.startPrice;
+          let eP = drawing.endPrice;
+
+          const isStartLeft = dragStartPos.wasStartEarlier ?? (sT <= eT);
+          const isStartTop = dragStartPos.wasStartHigher ?? (sP >= eP);
+
+          if (hType === "tl") {
+            if (isStartLeft) sT = effectiveTime; else eT = effectiveTime;
+            if (isStartTop) sP = effectivePrice; else eP = effectivePrice;
+          } else if (hType === "tr") {
+            if (isStartLeft) eT = effectiveTime; else sT = effectiveTime;
+            if (isStartTop) sP = effectivePrice; else eP = effectivePrice;
+          } else if (hType === "bl") {
+            if (isStartLeft) sT = effectiveTime; else eT = effectiveTime;
+            if (isStartTop) eP = effectivePrice; else sP = effectivePrice;
+          } else if (hType === "br") {
+            if (isStartLeft) eT = effectiveTime; else sT = effectiveTime;
+            if (isStartTop) eP = effectivePrice; else sP = effectivePrice;
+          } else if (hType === "mt") {
+            if (isStartTop) sP = effectivePrice; else eP = effectivePrice;
+          } else if (hType === "mb") {
+            if (isStartTop) eP = effectivePrice; else sP = effectivePrice;
+          } else if (hType === "ml") {
+            if (isStartLeft) sT = effectiveTime; else eT = effectiveTime;
+          } else if (hType === "mr") {
+            if (isStartLeft) eT = effectiveTime; else sT = effectiveTime;
+          }
+
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, startTime: sT, endTime: eT, startPrice: sP, endPrice: eP }
+                : d
+            )
+          );
+          return;
+        }
+
+        // 3. Long / Short Position handles (DEC-054, DEC-065)
+        if (draggedHandle === "pos_target") {
+          saveDrawings(
+            drawings.map((d) => {
+              if (d.id !== selectedDrawingId) return d;
+              const isLong = d.type === "long_position";
+              const clampedTarget = isLong
+                ? Math.max(d.startPrice + 0.01, effectivePrice)
+                : Math.min(d.startPrice - 0.01, effectivePrice);
+              return { ...d, targetPrice: clampedTarget, endPrice: clampedTarget };
+            })
+          );
+          return;
+        }
+        if (draggedHandle === "pos_stop") {
+          saveDrawings(
+            drawings.map((d) => {
+              if (d.id !== selectedDrawingId) return d;
+              const isLong = d.type === "long_position";
+              const clampedStop = isLong
+                ? Math.min(d.startPrice - 0.01, effectivePrice)
+                : Math.max(d.startPrice + 0.01, effectivePrice);
+              return { ...d, stopPrice: clampedStop };
+            })
+          );
+          return;
+        }
+        if (draggedHandle === "pos_entry") {
+          saveDrawings(
+            drawings.map((d) => {
+              if (d.id !== selectedDrawingId) return d;
+              const isLong = d.type === "long_position";
+              const curTarget =
+                d.targetPrice !== undefined
+                  ? d.targetPrice
+                  : isLong
+                  ? d.startPrice * 1.04
+                  : d.startPrice * 0.96;
+              const curStop =
+                d.stopPrice !== undefined
+                  ? d.stopPrice
+                  : isLong
+                  ? d.startPrice * 0.98
+                  : d.startPrice * 1.02;
+              const clamped = clampPositionEntryPrice(effectivePrice, curTarget, curStop, isLong);
+              return {
+                ...d,
+                startPrice: clamped,
+                targetPrice: curTarget,
+                stopPrice: curStop,
+              };
+            })
+          );
+          return;
+        }
+        if (draggedHandle === "pos_width") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, endTime: effectiveTime }
+                : d
+            )
+          );
+          return;
+        }
+
+        // 4. Circle handles
+        if (draggedHandle === "circle_center") {
+          const dt = effectiveTime - drawing.startTime;
+          const dp = effectivePrice - drawing.startPrice;
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? {
+                    ...d,
+                    startTime: effectiveTime,
+                    startPrice: effectivePrice,
+                    endTime: d.endTime + dt,
+                    endPrice: d.endPrice + dp,
+                  }
+                : d
+            )
+          );
+          return;
+        }
+        if (draggedHandle === "circle_radius") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, endTime: effectiveTime, endPrice: effectivePrice }
+                : d
+            )
+          );
+          return;
+        }
+
+        // 5. Date Range handles
+        if (draggedHandle === "dr_start") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId ? { ...d, startTime: effectiveTime } : d
+            )
+          );
+          return;
+        }
+        if (draggedHandle === "dr_end") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId ? { ...d, endTime: effectiveTime } : d
+            )
+          );
+          return;
+        }
+
+        // 6. Horizontal & Vertical Line handles
+        if (draggedHandle === "h_center") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, startPrice: effectivePrice, endPrice: effectivePrice }
+                : d
+            )
+          );
+          return;
+        }
+        if (draggedHandle === "v_center") {
+          saveDrawings(
+            drawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, startTime: effectiveTime, endTime: effectiveTime }
+                : d
+            )
+          );
+          return;
+        }
+
+        // 7. Standard start & end handles
         if (draggedHandle === "start") {
           saveDrawings(
             drawings.map((d) =>
@@ -1761,7 +4070,9 @@ export function TradingViewContainer({
                 : d
             )
           );
-        } else if (draggedHandle === "end") {
+          return;
+        }
+        if (draggedHandle === "end") {
           saveDrawings(
             drawings.map((d) =>
               d.id === selectedDrawingId
@@ -1769,25 +4080,59 @@ export function TradingViewContainer({
                 : d
             )
           );
-        } else if (draggedHandle === "body") {
+          return;
+        }
+
+        // 8. Body translation
+        if (draggedHandle === "body") {
           const deltaPrice =
             effectivePrice - (coordinateToPrice(dragStartPos.y) || dragStartPos.startPrice);
           const startCoordTime = coordinateToTime(dragStartPos.x) || dragStartPos.startTime;
           const deltaTime = effectiveTime - startCoordTime;
 
-          saveDrawings(
-            drawings.map((d) =>
-              d.id === selectedDrawingId
-                ? {
-                    ...d,
-                    startTime: dragStartPos.startTime + deltaTime,
-                    endTime: dragStartPos.endTime + deltaTime,
-                    startPrice: dragStartPos.startPrice + deltaPrice,
-                    endPrice: dragStartPos.endPrice + deltaPrice,
-                  }
-                : d
-            )
-          );
+          if ((drawing.type === "path" || drawing.type === "trend_fib") && dragStartPos.points) {
+            const translatedPoints = dragStartPos.points.map((pt) => ({
+              time: pt.time + deltaTime,
+              price: pt.price + deltaPrice,
+            }));
+            saveDrawings(
+              drawings.map((d) =>
+                d.id === selectedDrawingId
+                  ? {
+                      ...d,
+                      points: translatedPoints,
+                      startTime: dragStartPos.startTime + deltaTime,
+                      endTime: dragStartPos.endTime + deltaTime,
+                      startPrice: dragStartPos.startPrice + deltaPrice,
+                      endPrice: dragStartPos.endPrice + deltaPrice,
+                    }
+                  : d
+              )
+            );
+          } else {
+            saveDrawings(
+              drawings.map((d) =>
+                d.id === selectedDrawingId
+                  ? {
+                      ...d,
+                      startTime: dragStartPos.startTime + deltaTime,
+                      endTime: dragStartPos.endTime + deltaTime,
+                      startPrice: dragStartPos.startPrice + deltaPrice,
+                      endPrice: dragStartPos.endPrice + deltaPrice,
+                      targetPrice:
+                        dragStartPos.targetPrice !== undefined
+                          ? dragStartPos.targetPrice + deltaPrice
+                          : undefined,
+                      stopPrice:
+                        dragStartPos.stopPrice !== undefined
+                          ? dragStartPos.stopPrice + deltaPrice
+                          : undefined,
+                    }
+                  : d
+              )
+            );
+          }
+          return;
         }
       }
       return;
@@ -1795,6 +4140,7 @@ export function TradingViewContainer({
 
     const hit = getHitTestResult(x, y);
     setIsHoveringDrawing(hit !== null);
+    setHoveredHandle(hit ? hit.handle : null);
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1825,6 +4171,30 @@ export function TradingViewContainer({
       }
     }
 
+    // Finalize freehand brush stroke (DEC-063)
+    if (activeDrawingTool === "brush") {
+      if (inFlightBrushPoints.length > 1) {
+        const finished: ChartDrawing = {
+          id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          type: "brush",
+          points: [...inFlightBrushPoints],
+          startTime: inFlightBrushPoints[0].time,
+          endTime: inFlightBrushPoints[inFlightBrushPoints.length - 1].time,
+          startPrice: inFlightBrushPoints[0].price,
+          endPrice: inFlightBrushPoints[inFlightBrushPoints.length - 1].price,
+          color: "#2962ff",
+          lineWidth: 2.5,
+          lineStyle: "solid",
+          isLocked: isDrawingsLocked || false,
+        };
+        saveDrawings([...drawings, finished]);
+        setSelectedDrawingId(finished.id);
+      }
+      setInFlightBrushPoints([]);
+      setIsDrawing(false);
+      return;
+    }
+
     if (drawingStep === 1 && inFlightDrawing && dragStartPos) {
       const dist = Math.hypot(x - dragStartPos.x, y - dragStartPos.y);
       if (dist > 15) {
@@ -1845,8 +4215,52 @@ export function TradingViewContainer({
     }
 
     if (draggedHandle) {
+      if (preDragDrawingsRef.current !== null) {
+        commitHistoryBaseline(preDragDrawingsRef.current, drawingsRef.current);
+        preDragDrawingsRef.current = null;
+      }
+      draggedHandleRef.current = null;
       setDraggedHandle(null);
       setDragStartPos(null);
+    }
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = drawingCanvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Finish in-flight path if active (DEC-047)
+    if (activeDrawingTool === "path") {
+      if (inFlightPathPoints.length >= 2) {
+        const finishedDrawing: ChartDrawing = {
+          id: `drawing_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          type: "path",
+          points: [...inFlightPathPoints],
+          startTime: inFlightPathPoints[0].time,
+          endTime: inFlightPathPoints[inFlightPathPoints.length - 1].time,
+          startPrice: inFlightPathPoints[0].price,
+          endPrice: inFlightPathPoints[inFlightPathPoints.length - 1].price,
+          color: "#2962ff",
+          lineWidth: 2,
+          lineStyle: "solid",
+          isLocked: isDrawingsLocked || false,
+        };
+        saveDrawings([...drawings, finishedDrawing]);
+        setSelectedDrawingId(finishedDrawing.id);
+        setInFlightPathPoints([]);
+        setMousePos(null);
+        onSelectDrawingTool?.("none");
+      }
+      return;
+    }
+
+    // Double-click on existing drawing opens TradingView Settings Modal (DEC-048)
+    const hit = getHitTestResult(x, y);
+    if (hit) {
+      setSelectedDrawingId(hit.drawing.id);
+      setIsSettingsModalOpen(true);
     }
   };
 
@@ -1904,37 +4318,89 @@ export function TradingViewContainer({
     activeIndicators.includes("Zero-Lag MACD Histogram") ||
     activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
 
-  // Drawing overlay interaction state (DEC-042 & DEC-043)
+  const hasVolumeProfile =
+    activeIndicators.includes("Volume Profile & Dynamic Point of Control (POC)") ||
+    activeIndicators.some(
+      (ind) =>
+        ind.toLowerCase().includes("volume profile") ||
+        ind.toLowerCase().includes("poc")
+    );
+
+  const vpvrHudProfile = hasVolumeProfile
+    ? calculateVisibleVolumeProfile(bars, vpvrRows, vpvrVaPercent / 100)
+    : null;
+
+  // Drawing overlay interaction state (DEC-042, DEC-043 & DEC-073)
   const isDrawingMode = activeDrawingTool !== "none" && activeDrawingTool !== "crosshair";
   const isInteracting =
+    replayState === "SELECTING" ||
     isDrawingMode ||
     isDrawing ||
     drawingStep === 1 ||
+    inFlightPathPoints.length > 0 ||
+    inFlightTrendFibPoints.length > 0 ||
     draggedHandle !== null ||
     selectedDrawingId !== null ||
     isHoveringDrawing;
 
-  const canvasCursor = isDrawingMode
-    ? "crosshair"
-    : draggedHandle
-    ? "grabbing"
-    : isHoveringDrawing
-    ? "grab"
-    : "default";
+  const canvasCursor = (() => {
+    if (replayState === "SELECTING") return "col-resize";
+    if (isDrawingMode) return "crosshair";
+    const h = draggedHandle || hoveredHandle;
+    if (draggedHandle) {
+      if (h && ["rect_ml", "rect_mr", "pos_width", "dr_start", "dr_end", "v_center"].includes(h)) return "ew-resize";
+      if (h && ["rect_mt", "rect_mb", "pos_target", "pos_stop", "pos_entry", "h_center"].includes(h)) return "ns-resize";
+      if (h && ["rect_tl", "rect_br"].includes(h)) return "nwse-resize";
+      if (h && ["rect_tr", "rect_bl", "gann_bl", "gann_tr"].includes(h)) return "nesw-resize";
+      return "grabbing";
+    }
+    if (h) {
+      if (["rect_ml", "rect_mr", "pos_width", "dr_start", "dr_end", "v_center"].includes(h)) return "ew-resize";
+      if (["rect_mt", "rect_mb", "pos_target", "pos_stop", "pos_entry", "h_center"].includes(h)) return "ns-resize";
+      if (["rect_tl", "rect_br"].includes(h)) return "nwse-resize";
+      if (["rect_tr", "rect_bl", "gann_bl", "gann_tr"].includes(h)) return "nesw-resize";
+      if (["start", "end", "circle_center", "circle_radius"].includes(h) || h.startsWith("node_")) return "grab";
+      return "grab";
+    }
+    return "default";
+  })();
 
   const selectedDrawing = drawings.find((d) => d.id === selectedDrawingId);
   let floatingToolbarPos: { x: number; y: number } | null = null;
   if (selectedDrawing && !isDrawingsHidden) {
-    const x1 = getSafeScreenX(selectedDrawing.startTime);
-    const y1 = getSafeScreenY(selectedDrawing.startPrice);
-    const x2 = getSafeScreenX(selectedDrawing.endTime);
-    const y2 = getSafeScreenY(selectedDrawing.endPrice);
-    if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
-      const rect = drawingCanvasRef.current?.getBoundingClientRect();
-      const width = rect?.width || 800;
-      const top = Math.max(40, Math.min(y1, y2) - 40);
-      const left = Math.max(12, Math.min(width - 180, (x1 + x2) / 2 - 80));
-      floatingToolbarPos = { x: left, y: top };
+    if (
+      (selectedDrawing.type === "path" || selectedDrawing.type === "trend_fib") &&
+      selectedDrawing.points &&
+      selectedDrawing.points.length > 0
+    ) {
+      const screenPts = selectedDrawing.points
+        .map((pt) => ({ x: timeToCoordinate(pt.time), y: priceToCoordinate(pt.price) }))
+        .filter((p) => p.x !== null && p.y !== null) as Array<{ x: number; y: number }>;
+      if (screenPts.length > 0) {
+        const minX = Math.min(...screenPts.map((p) => p.x));
+        const maxX = Math.max(...screenPts.map((p) => p.x));
+        const minY = Math.min(...screenPts.map((p) => p.y));
+        const rect = drawingCanvasRef.current?.getBoundingClientRect();
+        const width = rect?.width || 800;
+        const top = Math.max(40, minY - 40);
+        const left = Math.max(12, Math.min(width - 180, (minX + maxX) / 2 - 80));
+        floatingToolbarPos = { x: left, y: top };
+      }
+    } else {
+      const x1 = getSafeScreenX(selectedDrawing.startTime);
+      const y1 = getSafeScreenY(selectedDrawing.startPrice);
+      const x2 = getSafeScreenX(selectedDrawing.endTime);
+      const y2 = getSafeScreenY(selectedDrawing.endPrice);
+      if (y1 !== null) {
+        const rect = drawingCanvasRef.current?.getBoundingClientRect();
+        const width = rect?.width || 800;
+        const validX1 = x1 !== null ? x1 : width / 2;
+        const validX2 = x2 !== null ? x2 : width / 2;
+        const validY2 = y2 !== null ? y2 : y1;
+        const top = Math.max(40, Math.min(y1, validY2) - 40);
+        const left = Math.max(12, Math.min(width - 180, (validX1 + validX2) / 2 - 80));
+        floatingToolbarPos = { x: left, y: top };
+      }
     }
   }
 
@@ -2040,8 +4506,71 @@ export function TradingViewContainer({
           </div>
         </div>
 
-        {/* Right: Real-time Telemetry Status */}
-        <div className="flex items-center gap-3 text-[11px] text-muted shrink-0">
+        {/* Right: Real-time Telemetry Status, Quick-Trade & VPVR Toggle */}
+        <div className="flex items-center gap-2 text-[11px] text-muted shrink-0">
+          {/* Quick Paper Trade Buttons (DEC-072) */}
+          <div className="flex items-center gap-1 bg-surface-container-low p-0.5 rounded border border-border">
+            <button
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent("mochex:execute-paper-order", {
+                    detail: {
+                      order: {
+                        symbol,
+                        side: "long",
+                        orderType: "market",
+                        marginAmountUsdt: 1000,
+                        leverage: 5,
+                      },
+                    },
+                  })
+                );
+              }}
+              title="1-Click Paper Market Buy / Long ($1,000 Margin · 5x)"
+              className="px-1.5 py-0.5 rounded bg-[#00c087]/20 hover:bg-[#00c087] text-[#00c087] hover:text-[#06121c] border border-[#00c087]/40 text-[10px] font-bold transition-colors cursor-pointer"
+            >
+              BUY MKT
+            </button>
+            <button
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent("mochex:execute-paper-order", {
+                    detail: {
+                      order: {
+                        symbol,
+                        side: "short",
+                        orderType: "market",
+                        marginAmountUsdt: 1000,
+                        leverage: 5,
+                      },
+                    },
+                  })
+                );
+              }}
+              title="1-Click Paper Market Sell / Short ($1,000 Margin · 5x)"
+              className="px-1.5 py-0.5 rounded bg-[#ff3b30]/20 hover:bg-[#ff3b30] text-[#ff3b30] hover:text-white border border-[#ff3b30]/40 text-[10px] font-bold transition-colors cursor-pointer"
+            >
+              SELL MKT
+            </button>
+          </div>
+
+          {onToggleIndicator && (
+            <button
+              onClick={() =>
+                onToggleIndicator("Volume Profile & Dynamic Point of Control (POC)")
+              }
+              title="Toggle Visible Range Volume Profile (VPVR · POC / VAH / VAL)"
+              className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-semibold transition-colors cursor-pointer ${
+                hasVolumeProfile
+                  ? "bg-gold/15 text-gold border-gold/40"
+                  : "bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border-border"
+              }`}
+            >
+              <BarChart2 size={11} />
+              <span>VPVR</span>
+            </button>
+          )}
+
           <div className="flex items-center gap-1.5">
             <Activity size={12} className="text-secondary animate-pulse" />
             <span className="hidden sm:inline">MEXC V3 WebSocket Live</span>
@@ -2066,6 +4595,7 @@ export function TradingViewContainer({
           const y = e.clientY - rect.top;
           const hit = getHitTestResult(x, y);
           setIsHoveringDrawing(hit !== null);
+          setHoveredHandle(hit ? hit.handle : null);
         }}
       >
         {hasLibrary ? (
@@ -2084,9 +4614,12 @@ export function TradingViewContainer({
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
+              onDoubleClick={handleDoubleClick}
               onMouseLeave={() => {
                 setSnappedPoint(null);
                 setIsHoveringDrawing(false);
+                setHoveredHandle(null);
+                setMousePos(null);
                 if (draggedHandle) {
                   setDraggedHandle(null);
                   setDragStartPos(null);
@@ -2100,12 +4633,72 @@ export function TradingViewContainer({
               }}
             />
 
-            {/* Floating Action Pill for Selected Drawing (DEC-043) */}
+            {/* Floating Action Pill for Selected Drawing (DEC-043 & DEC-048) */}
             {selectedDrawing && floatingToolbarPos && !isDrawingsHidden && (
               <div
                 style={{ top: floatingToolbarPos.y, left: floatingToolbarPos.x }}
                 className="absolute z-30 flex items-center gap-1.5 bg-surface-container-lowest/95 border border-border px-2 py-1 rounded-md shadow-xl backdrop-blur-md text-xs font-mono"
               >
+                {/* 1-Click Execute Paper Trade from Long/Short Position Drawing (DEC-072) */}
+                {(selectedDrawing.type === "long_position" ||
+                  selectedDrawing.type === "short_position") && (
+                  <button
+                    onClick={() => {
+                      const orderInput = createOrderInputFromDrawing(
+                        selectedDrawing,
+                        symbol,
+                        currentPrice || selectedDrawing.startPrice,
+                        5
+                      );
+                      if (orderInput) {
+                        window.dispatchEvent(
+                          new CustomEvent("mochex:execute-paper-order", {
+                            detail: { order: orderInput },
+                          })
+                        );
+                      }
+                    }}
+                    className={`flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-[10px] cursor-pointer transition-colors ${
+                      selectedDrawing.type === "long_position"
+                        ? "bg-[#00c087]/20 hover:bg-[#00c087] text-[#00c087] hover:text-[#06121c] border border-[#00c087]/40"
+                        : "bg-[#ff3b30]/20 hover:bg-[#ff3b30] text-[#ff3b30] hover:text-white border border-[#ff3b30]/40"
+                    }`}
+                    title="Execute Paper Trade with this Position Drawing's Entry, TP & SL"
+                  >
+                    <Play size={10} />
+                    <span>Trade</span>
+                  </button>
+                )}
+
+                {/* Settings button */}
+                <button
+                  onClick={() => setIsSettingsModalOpen(true)}
+                  className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                  title="Drawing Settings"
+                >
+                  <Settings2 size={13} />
+                </button>
+
+                {/* Add Crossing Alert button (DEC-069) */}
+                <button
+                  onClick={() => {
+                    const newAlerts = createAlertsFromDrawing(selectedDrawing, symbol);
+                    window.dispatchEvent(
+                      new CustomEvent("mochex:create-drawing-alert", {
+                        detail: { alerts: newAlerts },
+                      })
+                    );
+                  }}
+                  className={`p-1 rounded cursor-pointer transition-colors ${
+                    activeAlerts.some((a) => a.drawingId === selectedDrawing.id && a.active)
+                      ? "text-gold bg-gold/15"
+                      : "text-muted hover:text-gold hover:bg-surface"
+                  }`}
+                  title="Add Crossing Alert on Drawing"
+                >
+                  <BellPlus size={13} />
+                </button>
+
                 {/* Color cycle button */}
                 <button
                   onClick={() => {
@@ -2148,6 +4741,38 @@ export function TradingViewContainer({
                   {selectedDrawing.isLocked ? <Lock size={13} /> : <Unlock size={13} />}
                 </button>
 
+                {/* Clone / Duplicate button (DEC-070) */}
+                <button
+                  onClick={() => {
+                    const cloned = cloneDrawingObject(
+                      selectedDrawing,
+                      getResolutionMs(resolution) * 3
+                    );
+                    saveDrawings([...drawings, cloned]);
+                    setSelectedDrawingId(cloned.id);
+                  }}
+                  className="p-1 rounded text-muted hover:text-primary hover:bg-surface cursor-pointer transition-colors"
+                  title="Clone / Duplicate Drawing (Ctrl+D)"
+                >
+                  <Copy size={13} />
+                </button>
+
+                {/* Hide Layer button (DEC-070) */}
+                <button
+                  onClick={() => {
+                    saveDrawings(
+                      drawings.map((d) =>
+                        d.id === selectedDrawing.id ? { ...d, isHidden: true } : d
+                      )
+                    );
+                    setSelectedDrawingId(null);
+                  }}
+                  className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer transition-colors"
+                  title="Hide Drawing Layer (Manage in Object Tree)"
+                >
+                  <EyeOff size={13} />
+                </button>
+
                 {/* Delete button */}
                 <button
                   onClick={() => {
@@ -2176,6 +4801,31 @@ export function TradingViewContainer({
                   <X size={13} />
                 </button>
               </div>
+            )}
+
+            {/* TradingView 3-Tab Drawing Settings Modal (DEC-048) */}
+            <DrawingSettingsModal
+              isOpen={isSettingsModalOpen}
+              onClose={() => setIsSettingsModalOpen(false)}
+              drawing={selectedDrawing || null}
+              onUpdateDrawing={(updated) => {
+                saveDrawings(drawings.map((d) => (d.id === updated.id ? updated : d)));
+              }}
+              onDeleteDrawing={(id) => {
+                saveDrawings(drawings.filter((d) => d.id !== id));
+                setSelectedDrawingId(null);
+                setIsSettingsModalOpen(false);
+              }}
+            />
+
+            {/* TradingView Floating Draggable Favorites Toolbar (DEC-064) */}
+            {showFavoritesBar && favoriteTools && favoriteTools.length > 0 && (
+              <FavoritesToolbar
+                favoriteTools={favoriteTools}
+                activeTool={activeDrawingTool}
+                onSelectTool={onSelectDrawingTool || (() => {})}
+                onClose={onToggleFavoritesBar || (() => {})}
+              />
             )}
 
             {/* Floating In-Pane Header Badges (DEC-038) */}
@@ -2267,14 +4917,65 @@ export function TradingViewContainer({
                   </div>
                 </div>
               )}
+              {hasVolumeProfile && (
+                <div className="pointer-events-auto flex items-center gap-2 bg-surface-container-lowest/90 border border-border px-2.5 py-1 rounded text-[11px] font-mono shadow-sm backdrop-blur-xs">
+                  <span className="w-2 h-2 rounded-full bg-gold" />
+                  <span className="font-semibold text-on-surface">
+                    VPVR ({vpvrRows} rows, {vpvrVaPercent}% VA)
+                  </span>
+                  {vpvrHudProfile && (
+                    <>
+                      <span className="text-gold font-semibold">
+                        POC ${vpvrHudProfile.pocPrice >= 1 ? vpvrHudProfile.pocPrice.toFixed(2) : vpvrHudProfile.pocPrice.toFixed(4)}
+                      </span>
+                      <span className="text-[#2962ff]">
+                        VAH ${vpvrHudProfile.vahPrice >= 1 ? vpvrHudProfile.vahPrice.toFixed(2) : vpvrHudProfile.vahPrice.toFixed(4)}
+                      </span>
+                      <span className="text-[#2962ff]">
+                        VAL ${vpvrHudProfile.valPrice >= 1 ? vpvrHudProfile.valPrice.toFixed(2) : vpvrHudProfile.valPrice.toFixed(4)}
+                      </span>
+                    </>
+                  )}
+                  <div className="flex items-center gap-1 pl-1.5 border-l border-border text-muted">
+                    <button
+                      onClick={() =>
+                        setActiveSettingsModal(
+                          activeSettingsModal === "vpvr" ? null : "vpvr"
+                        )
+                      }
+                      className="hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                      title="Configure Volume Profile (VPVR)"
+                    >
+                      <Settings size={12} />
+                    </button>
+                    {onToggleIndicator && (
+                      <button
+                        onClick={() =>
+                          onToggleIndicator(
+                            "Volume Profile & Dynamic Point of Control (POC)"
+                          )
+                        }
+                        className="hover:text-tertiary transition-colors p-0.5 rounded cursor-pointer"
+                        title="Remove Volume Profile"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Quick Parameter Tuning Modal (DEC-038) */}
+            {/* Quick Parameter Tuning Modal (DEC-038 & DEC-071) */}
             {activeSettingsModal && (
               <div className="absolute top-12 left-2 z-30 bg-surface-container-low border border-border p-3 rounded-lg shadow-xl font-mono text-xs w-64 backdrop-blur-md">
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-border">
                   <span className="font-semibold text-on-surface uppercase">
-                    {activeSettingsModal === "rsi" ? "RSI Parameters" : "MACD Parameters"}
+                    {activeSettingsModal === "rsi"
+                      ? "RSI Parameters"
+                      : activeSettingsModal === "macd"
+                      ? "MACD Parameters"
+                      : "VPVR Parameters"}
                   </span>
                   <button
                     onClick={() => setActiveSettingsModal(null)}
@@ -2283,6 +4984,39 @@ export function TradingViewContainer({
                     <X size={13} />
                   </button>
                 </div>
+
+                {activeSettingsModal === "vpvr" && (
+                  <div className="flex flex-col gap-2">
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Row Layout (12–80):</span>
+                      <input
+                        type="number"
+                        min="8"
+                        max="80"
+                        value={vpvrRows}
+                        onChange={(e) =>
+                          setVpvrRows(Math.max(8, Math.min(80, parseInt(e.target.value) || 24)))
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between text-muted text-[11px]">
+                      <span>Value Area % (70):</span>
+                      <input
+                        type="number"
+                        min="50"
+                        max="95"
+                        value={vpvrVaPercent}
+                        onChange={(e) =>
+                          setVpvrVaPercent(
+                            Math.max(50, Math.min(95, parseInt(e.target.value) || 70))
+                          )
+                        }
+                        className="w-16 bg-surface px-1.5 py-0.5 rounded border border-border text-right text-on-surface"
+                      />
+                    </label>
+                  </div>
+                )}
 
                 {activeSettingsModal === "rsi" && (
                   <div className="flex flex-col gap-2">

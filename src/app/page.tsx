@@ -39,6 +39,13 @@ export default function WorkstationPage() {
   const [activeIndicators, setActiveIndicators] = useState<string[]>([
     "EMA Ribbon Momentum Multi-Timeframe",
   ]);
+  const [favoriteTools, setFavoriteTools] = useState<DrawingToolType[]>([
+    "trendline",
+    "horizontal_line",
+    "rectangle",
+    "fibonacci",
+  ]);
+  const [showFavoritesBar, setShowFavoritesBar] = useState(true);
 
   // Market metrics tape
   const [marketStats, setMarketStats] = useState({
@@ -76,15 +83,36 @@ export default function WorkstationPage() {
       const savedSidebar = localStorage.getItem("mochex:sidebar_open");
       const savedStudio = localStorage.getItem("mochex:studio_open");
       const savedIndicators = localStorage.getItem("mochex:active_indicators");
+      const savedFavs = localStorage.getItem("mochex:favorite_drawing_tools");
+      const savedShowFavs = localStorage.getItem("mochex:show_favorites_bar");
 
       if (savedSymbol) setSymbol(savedSymbol);
       if (savedRes) setResolution(savedRes);
       if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
       if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
       if (savedIndicators) setActiveIndicators(JSON.parse(savedIndicators));
+      if (savedFavs) setFavoriteTools(JSON.parse(savedFavs));
+      if (savedShowFavs !== null) setShowFavoritesBar(savedShowFavs === "true");
     } catch {
       // Ignore localStorage errors
     }
+  }, []);
+
+  useEffect(() => {
+    const handleOpenSidebarEvent = () => {
+      setIsSidebarOpen(true);
+      try {
+        localStorage.setItem("mochex:sidebar_open", "true");
+      } catch {}
+    };
+    window.addEventListener("mochex:open-object-tree", handleOpenSidebarEvent);
+    window.addEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
+    window.addEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
+    return () => {
+      window.removeEventListener("mochex:open-object-tree", handleOpenSidebarEvent);
+      window.removeEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
+      window.removeEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
+    };
   }, []);
 
   // Save changes to localStorage
@@ -128,10 +156,6 @@ export default function WorkstationPage() {
       setIsReplayActive(false);
     } else {
       replayEngine.startSelecting();
-      if (cachedBars.length > 50) {
-        const cutoff = cachedBars[cachedBars.length - 30].time;
-        replayEngine.setCutoffTime(cutoff);
-      }
       setIsReplayActive(true);
     }
   };
@@ -150,6 +174,39 @@ export default function WorkstationPage() {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("mochex:clear-drawings"));
     }
+  };
+
+  const handleClearIndicators = () => {
+    setActiveIndicators([]);
+    try {
+      localStorage.setItem("mochex:active_indicators", JSON.stringify([]));
+    } catch {}
+  };
+
+  const handleClearAll = () => {
+    handleClearDrawings();
+    handleClearIndicators();
+  };
+
+  const handleToggleFavoriteTool = (tool: DrawingToolType) => {
+    setFavoriteTools((prev) => {
+      const exists = prev.includes(tool);
+      const next = exists ? prev.filter((t) => t !== tool) : [...prev, tool];
+      try {
+        localStorage.setItem("mochex:favorite_drawing_tools", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleToggleFavoritesBar = () => {
+    setShowFavoritesBar((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("mochex:show_favorites_bar", String(next));
+      } catch {}
+      return next;
+    });
   };
 
   const handleLoadLayout = (layout: SavedLayoutItem) => {
@@ -213,7 +270,13 @@ export default function WorkstationPage() {
             onToggleLock={() => setIsDrawingsLocked((prev) => !prev)}
             isHidden={isDrawingsHidden}
             onToggleHide={() => setIsDrawingsHidden((prev) => !prev)}
-            onClearAll={handleClearDrawings}
+            onClearDrawings={handleClearDrawings}
+            onClearIndicators={handleClearIndicators}
+            onClearAll={handleClearAll}
+            favoriteTools={favoriteTools}
+            onToggleFavorite={handleToggleFavoriteTool}
+            showFavoritesBar={showFavoritesBar}
+            onToggleFavoritesBar={handleToggleFavoritesBar}
           />
         </div>
 
@@ -233,6 +296,10 @@ export default function WorkstationPage() {
               trades={strategyResult?.trades || []}
               onBarsLoaded={handleBarsLoaded}
               onPriceUpdate={handlePriceUpdate}
+              favoriteTools={favoriteTools}
+              onToggleFavorite={handleToggleFavoriteTool}
+              showFavoritesBar={showFavoritesBar}
+              onToggleFavoritesBar={handleToggleFavoritesBar}
             />
 
             {/* In-chart Floating Simulation Control Pill */}
@@ -263,6 +330,8 @@ export default function WorkstationPage() {
             onSelectSymbol={handleSelectSymbol}
             currentPrice={marketStats.price}
             user={user}
+            activeIndicators={activeIndicators}
+            onToggleIndicator={handleApplyIndicator}
           />
         </div>
       </div>

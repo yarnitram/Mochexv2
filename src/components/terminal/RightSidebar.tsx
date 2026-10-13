@@ -1,22 +1,63 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Search,
   Plus,
   Bell,
+  BellRing,
+  Volume2,
+  VolumeX,
+  Play,
+  Pause,
   Flame,
   Star,
   ChevronDown,
+  ChevronUp,
   Trash2,
   X,
   List,
+  Layers,
+  Eye,
+  EyeOff,
+  Lock,
+  Unlock,
+  Copy,
+  Settings2,
+  Edit3,
+  Check,
+  TrendingUp,
+  RotateCcw,
 } from "lucide-react";
 import { mexcWsManager } from "@/lib/mexc/websocket";
 import { MexcMiniTickerItem } from "@/lib/mexc/types";
 import { OrderDepthLadder } from "./OrderDepthLadder";
 import { AddPairModal } from "../watchlist/AddPairModal";
 import { AuthUser } from "@/lib/auth/use-auth";
+import { ChartDrawing, formatDrawingObjectLabel } from "@/lib/chart/drawing-math";
+import {
+  PriceAlert,
+  AlertLogEntry,
+  AlertCondition,
+  AlertFrequency,
+  evaluateAlertsBatch,
+  playInstitutionalAlertChime,
+} from "@/lib/alerts/alerts-engine";
+import {
+  PaperAccountState,
+  PaperOrderInput,
+  OrderSide,
+  OrderType,
+  createInitialPaperAccount,
+  placePaperOrder,
+  closePaperPosition,
+  cancelPaperOrder,
+  evaluatePaperTick,
+  calculatePositionUnrealizedPnl,
+  calculateAccountEquity,
+} from "@/lib/trading/paper-trading-engine";
+import { getIntrabarPricePath } from "@/lib/replay/replay-engine";
+import { Bar } from "@/types/tradingview";
 
 interface RightSidebarProps {
   isOpen: boolean;
@@ -25,6 +66,8 @@ interface RightSidebarProps {
   onSelectSymbol: (symbol: string) => void;
   currentPrice?: number;
   user?: AuthUser | null;
+  activeIndicators?: string[];
+  onToggleIndicator?: (name: string) => void;
 }
 
 interface TickerRow {
@@ -54,11 +97,47 @@ export function RightSidebar({
   onSelectSymbol,
   currentPrice = 68420.5,
   user,
+  activeIndicators = [],
+  onToggleIndicator,
 }: RightSidebarProps) {
-  const [activeTab, setActiveTab] = useState<"watchlist" | "alerts" | "hot">("watchlist");
+  const [activeTab, setActiveTab] = useState<"watchlist" | "trade" | "alerts" | "objects" | "hot">("watchlist");
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddPairOpen, setIsAddPairOpen] = useState(false);
   const [isListDropdownOpen, setIsListDropdownOpen] = useState(false);
+
+  // Paper Trading & Order Execution State (DEC-072)
+  const [paperAccount, setPaperAccount] = useState<PaperAccountState>(() =>
+    createInitialPaperAccount(100000)
+  );
+  const paperAccountRef = useRef<PaperAccountState>(createInitialPaperAccount(100000));
+  const [orderSide, setOrderSide] = useState<OrderSide>("long");
+  const [orderType, setOrderType] = useState<OrderType>("market");
+  const [orderLimitPrice, setOrderLimitPrice] = useState<string>("");
+  const [orderMarginUsdt, setOrderMarginUsdt] = useState<string>("1000");
+  const [orderLeverage, setOrderLeverage] = useState<number>(5);
+  const [orderTp, setOrderTp] = useState<string>("");
+  const [orderSl, setOrderSl] = useState<string>("");
+  const [tradeSubTab, setTradeSubTab] = useState<"positions" | "orders" | "history">("positions");
+  const [tradeFeedback, setTradeFeedback] = useState<string | null>(null);
+
+  const savePaperAccount = useCallback((nextAccount: PaperAccountState) => {
+    paperAccountRef.current = nextAccount;
+    setPaperAccount(nextAccount);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("mochex:paper_account", JSON.stringify(nextAccount));
+      } catch {}
+      window.dispatchEvent(
+        new CustomEvent("mochex:paper-trading-updated", { detail: nextAccount })
+      );
+    }
+  }, []);
+
+  // Object Tree State (DEC-070)
+  const [chartDrawings, setChartDrawings] = useState<ChartDrawing[]>([]);
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [editingDrawingId, setEditingDrawingId] = useState<string | null>(null);
+  const [editingNameValue, setEditingNameValue] = useState<string>("");
 
   // Named Watchlists state
   const [activeListName, setActiveListName] = useState("Core Majors");
@@ -86,6 +165,331 @@ export function RightSidebar({
     });
     return map;
   });
+
+  // Live Price & Drawing Crossing Alerts State (DEC-069)
+  const [alerts, setAlerts] = useState<PriceAlert[]>([]);
+  const [alertLogs, setAlertLogs] = useState<AlertLogEntry[]>([]);
+  const [newAlertPrice, setNewAlertPrice] = useState<string>("");
+  const [newAlertCondition, setNewAlertCondition] = useState<AlertCondition>("crossing");
+  const [newAlertFrequency, setNewAlertFrequency] = useState<AlertFrequency>("only_once");
+  const [newAlertLabel, setNewAlertLabel] = useState<string>("");
+  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
+  const [activeToast, setActiveToast] = useState<AlertLogEntry | null>(null);
+
+  const alertsRef = useRef<PriceAlert[]>([]);
+  const prevPricesRef = useRef<Record<string, number>>({});
+  const isSoundEnabledRef = useRef<boolean>(true);
+  const currentPriceRef = useRef<number>(currentPrice);
+
+  useEffect(() => {
+    currentPriceRef.current = currentPrice;
+  }, [currentPrice]);
+
+  useEffect(() => {
+    isSoundEnabledRef.current = isSoundEnabled;
+  }, [isSoundEnabled]);
+
+  const saveAlerts = useCallback((nextAlerts: PriceAlert[]) => {
+    alertsRef.current = nextAlerts;
+    setAlerts(nextAlerts);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("mochex:price_alerts", JSON.stringify(nextAlerts));
+      } catch {}
+      window.dispatchEvent(new CustomEvent("mochex:alerts-updated"));
+    }
+  }, []);
+
+  const saveAlertLogs = useCallback((nextLogs: AlertLogEntry[]) => {
+    const capped = nextLogs.slice(0, 50);
+    setAlertLogs(capped);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("mochex:alert_logs", JSON.stringify(capped));
+      } catch {}
+    }
+  }, []);
+
+  // Load persisted alerts, logs, and paper account on client mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const savedAlerts = localStorage.getItem("mochex:price_alerts");
+      if (savedAlerts) {
+        const parsed = JSON.parse(savedAlerts);
+        if (Array.isArray(parsed)) {
+          alertsRef.current = parsed;
+          setAlerts(parsed);
+        }
+      }
+      const savedLogs = localStorage.getItem("mochex:alert_logs");
+      if (savedLogs) {
+        const parsedLogs = JSON.parse(savedLogs);
+        if (Array.isArray(parsedLogs)) {
+          setAlertLogs(parsedLogs);
+        }
+      }
+      const savedPaper = localStorage.getItem("mochex:paper_account");
+      if (savedPaper) {
+        const parsedPaper = JSON.parse(savedPaper);
+        if (parsedPaper && typeof parsedPaper.balance === "number") {
+          paperAccountRef.current = parsedPaper;
+          setPaperAccount(parsedPaper);
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Keep default target price & limit price inputs synced when switching symbols
+  useEffect(() => {
+    if (currentPrice > 0) {
+      const suggested =
+        currentPrice >= 1
+          ? (currentPrice * 1.005).toFixed(2)
+          : (currentPrice * 1.005).toFixed(4);
+      setNewAlertPrice(suggested);
+      setOrderLimitPrice(
+        currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
+      );
+    }
+  }, [selectedSymbol]);
+
+  // Listen for 1-click paper order execution from chart drawings or quick-trade bar (DEC-072)
+  useEffect(() => {
+    const handleExecutePaperOrder = (e: Event) => {
+      const detail = (e as CustomEvent<{ order: PaperOrderInput }>).detail;
+      if (!detail || !detail.order) return;
+
+      const mark =
+        detail.order.symbol === selectedSymbol
+          ? currentPriceRef.current
+          : prevPricesRef.current[detail.order.symbol] || currentPriceRef.current;
+
+      const res = placePaperOrder(
+        paperAccountRef.current,
+        detail.order,
+        mark,
+        Date.now()
+      );
+      savePaperAccount(res.state);
+      setActiveTab("trade");
+      setTradeSubTab(res.status === "placed" ? "orders" : "positions");
+      setTradeFeedback(res.message);
+      if (isSoundEnabledRef.current) {
+        playInstitutionalAlertChime();
+      }
+    };
+
+    const handleOpenPaperTrade = (e: Event) => {
+      const detail = (e as CustomEvent<{ side?: OrderSide }>).detail;
+      if (detail?.side) {
+        setOrderSide(detail.side);
+      }
+      setActiveTab("trade");
+    };
+
+    window.addEventListener("mochex:execute-paper-order", handleExecutePaperOrder);
+    window.addEventListener("mochex:open-paper-trade", handleOpenPaperTrade);
+    return () => {
+      window.removeEventListener("mochex:execute-paper-order", handleExecutePaperOrder);
+      window.removeEventListener("mochex:open-paper-trade", handleOpenPaperTrade);
+    };
+  }, [selectedSymbol, savePaperAccount]);
+
+  useEffect(() => {
+    if (!tradeFeedback) return;
+    const t = setTimeout(() => setTradeFeedback(null), 4000);
+    return () => clearTimeout(t);
+  }, [tradeFeedback]);
+
+  // Listen for 1-click drawing alerts from TradingViewContainer floating toolbar
+  useEffect(() => {
+    const handleCreateDrawingAlert = (e: Event) => {
+      const detail = (e as CustomEvent<{ alerts: PriceAlert[] }>).detail;
+      if (!detail || !Array.isArray(detail.alerts) || detail.alerts.length === 0) return;
+
+      const incoming = detail.alerts;
+      const incomingDrawingIds = new Set(incoming.map((a) => a.drawingId).filter(Boolean));
+      const filteredExisting = alertsRef.current.filter(
+        (a) => !(a.drawingId && incomingDrawingIds.has(a.drawingId))
+      );
+      const next = [...incoming, ...filteredExisting];
+      saveAlerts(next);
+      setActiveTab("alerts");
+      if (isSoundEnabledRef.current) {
+        playInstitutionalAlertChime();
+      }
+    };
+
+    window.addEventListener("mochex:create-drawing-alert", handleCreateDrawingAlert);
+    return () =>
+      window.removeEventListener("mochex:create-drawing-alert", handleCreateDrawingAlert);
+  }, [saveAlerts]);
+
+  // Listen for drawings synchronization and Object Tree open trigger (DEC-070)
+  useEffect(() => {
+    const handleDrawingsSync = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          symbol: string;
+          drawings: ChartDrawing[];
+          selectedDrawingId: string | null;
+        }>
+      ).detail;
+      if (detail && Array.isArray(detail.drawings)) {
+        setChartDrawings(detail.drawings);
+        setSelectedDrawingId(detail.selectedDrawingId || null);
+      }
+    };
+
+    const handleOpenObjectTree = () => {
+      setActiveTab("objects");
+      window.dispatchEvent(new CustomEvent("mochex:request-drawings-sync"));
+    };
+
+    window.addEventListener("mochex:drawings-sync", handleDrawingsSync);
+    window.addEventListener("mochex:open-object-tree", handleOpenObjectTree);
+    window.dispatchEvent(new CustomEvent("mochex:request-drawings-sync"));
+
+    return () => {
+      window.removeEventListener("mochex:drawings-sync", handleDrawingsSync);
+      window.removeEventListener("mochex:open-object-tree", handleOpenObjectTree);
+    };
+  }, []);
+
+  const dispatchObjectTreeAction = (
+    action:
+      | "select"
+      | "toggle_hide"
+      | "toggle_lock"
+      | "clone"
+      | "reorder"
+      | "rename"
+      | "open_settings"
+      | "delete",
+    drawingId: string,
+    extra?: { direction?: "forward" | "backward"; name?: string }
+  ) => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+      new CustomEvent("mochex:object-tree-action", {
+        detail: {
+          action,
+          drawingId,
+          ...extra,
+        },
+      })
+    );
+  };
+
+  // Helper to evaluate a price tick for a given symbol
+  const processSymbolPriceTick = useCallback(
+    (sym: string, nextPrice: number, customTimeMs?: number) => {
+      if (!Number.isFinite(nextPrice) || nextPrice <= 0) return;
+      const prevPrice = prevPricesRef.current[sym];
+      prevPricesRef.current[sym] = nextPrice;
+
+      const nowMs = customTimeMs && customTimeMs > 0 ? customTimeMs : Date.now();
+
+      // 1. Evaluate Paper Trading Limit fills & TP/SL triggers (DEC-072)
+      const currentPaper = paperAccountRef.current;
+      if (
+        currentPaper.orders.some((o) => o.symbol === sym) ||
+        currentPaper.positions.some((p) => p.symbol === sym)
+      ) {
+        const paperTick = evaluatePaperTick(currentPaper, sym, nextPrice, nowMs);
+        if (paperTick.filledOrders.length > 0 || paperTick.closedTrades.length > 0) {
+          savePaperAccount(paperTick.state);
+          if (paperTick.closedTrades.length > 0) {
+            const trd = paperTick.closedTrades[0];
+            const sign = trd.realizedPnl >= 0 ? "+" : "";
+            setTradeFeedback(
+              `${trd.exitReason === "take_profit" ? "TP HIT" : "SL HIT"} · ${trd.symbol.replace("USDT", "")} (${sign}$${trd.realizedPnl.toFixed(2)})`
+            );
+          } else if (paperTick.filledOrders.length > 0) {
+            const ord = paperTick.filledOrders[0];
+            setTradeFeedback(
+              `LIMIT FILLED · ${ord.side.toUpperCase()} ${ord.symbol.replace("USDT", "")} @ $${ord.limitPrice.toFixed(2)}`
+            );
+          }
+          if (isSoundEnabledRef.current) {
+            playInstitutionalAlertChime();
+          }
+        }
+      }
+
+      // 2. Evaluate Live Crossing Alerts (DEC-069)
+      if (typeof prevPrice !== "number" || prevPrice <= 0 || prevPrice === nextPrice) {
+        return;
+      }
+      if (alertsRef.current.length === 0) return;
+
+      const { updatedAlerts, triggeredLogs } = evaluateAlertsBatch(
+        alertsRef.current,
+        sym,
+        prevPrice,
+        nextPrice,
+        Math.floor(nowMs / 1000),
+        nowMs
+      );
+
+      if (triggeredLogs.length > 0) {
+        saveAlerts(updatedAlerts);
+        setAlertLogs((prev) => {
+          const next = [...triggeredLogs, ...prev].slice(0, 50);
+          try {
+            localStorage.setItem("mochex:alert_logs", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+        setActiveToast(triggeredLogs[0]);
+        if (isSoundEnabledRef.current) {
+          playInstitutionalAlertChime();
+        }
+      }
+    },
+    [saveAlerts, savePaperAccount]
+  );
+
+  // Listen for Bar Replay Intrabar OHLC Simulation ticks (DEC-073)
+  useEffect(() => {
+    const handleReplayTick = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          symbol: string;
+          bar: Bar;
+          isForwardStep?: boolean;
+        }>
+      ).detail;
+      if (!detail || !detail.bar || !detail.symbol) return;
+
+      if (detail.isForwardStep) {
+        const path = getIntrabarPricePath(detail.bar);
+        for (const pricePoint of path) {
+          processSymbolPriceTick(detail.symbol, pricePoint, detail.bar.time);
+        }
+      } else {
+        prevPricesRef.current[detail.symbol] = detail.bar.close;
+      }
+    };
+
+    window.addEventListener("mochex:replay-tick", handleReplayTick);
+    return () => window.removeEventListener("mochex:replay-tick", handleReplayTick);
+  }, [processSymbolPriceTick]);
+
+  // Evaluate whenever active chart symbol's currentPrice updates
+  useEffect(() => {
+    if (selectedSymbol && currentPrice > 0) {
+      processSymbolPriceTick(selectedSymbol, currentPrice);
+    }
+  }, [selectedSymbol, currentPrice, processSymbolPriceTick]);
+
+  // Auto-dismiss toast after 6 seconds
+  useEffect(() => {
+    if (!activeToast) return;
+    const timer = setTimeout(() => setActiveToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [activeToast]);
 
   // Sync cloud watchlists
   const fetchCloudWatchlists = useCallback(async () => {
@@ -118,10 +522,14 @@ export function RightSidebar({
       setTickers((prev) => {
         const next = { ...prev };
         for (const item of items) {
+          const parsedPrice = parseFloat(item.p);
+          if (parsedPrice > 0) {
+            processSymbolPriceTick(item.s, parsedPrice);
+          }
           if (next[item.s]) {
             next[item.s] = {
               ...next[item.s],
-              price: parseFloat(item.p) || next[item.s].price,
+              price: parsedPrice || next[item.s].price,
               change: parseFloat(item.r) * 100 || next[item.s].change,
               high: parseFloat(item.h) || next[item.s].high,
               low: parseFloat(item.l) || next[item.s].low,
@@ -137,7 +545,7 @@ export function RightSidebar({
     return () => {
       mexcWsManager.unsubscribeMiniTickers(handleTickers);
     };
-  }, []);
+  }, [processSymbolPriceTick]);
 
   const handleAddSymbol = async (sym: string) => {
     if (activeSymbols.includes(sym)) return;
@@ -186,49 +594,206 @@ export function RightSidebar({
     }
   };
 
+  const handleCreateManualAlert = (e: React.FormEvent) => {
+    e.preventDefault();
+    const target = parseFloat(newAlertPrice);
+    if (!Number.isFinite(target) || target <= 0) return;
+
+    const nowMs = Date.now();
+    const formattedPrice = target >= 1 ? target.toFixed(2) : target.toFixed(4);
+    const created: PriceAlert = {
+      id: `alert-price-${selectedSymbol}-${nowMs}`,
+      symbol: selectedSymbol,
+      targetPrice: target,
+      condition: newAlertCondition,
+      frequency: newAlertFrequency,
+      sourceType: "price",
+      label:
+        newAlertLabel.trim() ||
+        `${selectedSymbol.replace("USDT", "/USDT")} ${newAlertCondition.replace("_", " ")} $${formattedPrice}`,
+      active: true,
+      triggeredCount: 0,
+      createdAt: nowMs,
+    };
+
+    saveAlerts([created, ...alertsRef.current]);
+    setNewAlertLabel("");
+  };
+
+  const handleToggleAlertActive = (id: string) => {
+    const next = alertsRef.current.map((a) =>
+      a.id === id ? { ...a, active: !a.active } : a
+    );
+    saveAlerts(next);
+  };
+
+  const handleDeleteAlert = (id: string) => {
+    const next = alertsRef.current.filter((a) => a.id !== id);
+    saveAlerts(next);
+  };
+
+  const handleSubmitPaperOrder = (e: React.FormEvent) => {
+    e.preventDefault();
+    const marginVal = parseFloat(orderMarginUsdt);
+    const limitVal = parseFloat(orderLimitPrice);
+    const tpVal = orderTp.trim() ? parseFloat(orderTp) : undefined;
+    const slVal = orderSl.trim() ? parseFloat(orderSl) : undefined;
+
+    const res = placePaperOrder(
+      paperAccountRef.current,
+      {
+        symbol: selectedSymbol,
+        side: orderSide,
+        orderType,
+        price: orderType === "limit" ? limitVal : currentPrice,
+        marginAmountUsdt: marginVal,
+        leverage: orderLeverage,
+        takeProfit: tpVal && tpVal > 0 ? tpVal : undefined,
+        stopLoss: slVal && slVal > 0 ? slVal : undefined,
+      },
+      currentPrice,
+      Date.now()
+    );
+
+    savePaperAccount(res.state);
+    setTradeFeedback(res.message);
+    if (res.status === "placed") {
+      setTradeSubTab("orders");
+    } else if (res.status === "filled") {
+      setTradeSubTab("positions");
+    }
+    if (res.status !== "rejected" && isSoundEnabledRef.current) {
+      playInstitutionalAlertChime();
+    }
+  };
+
   if (!isOpen) return null;
 
-  const tickerList = activeSymbols
+  const baseTickerList = activeSymbols
     .map((sym) => tickers[sym] || { symbol: sym, price: 1.0, change: 0, high: 1, low: 1, volume: 1000 })
     .filter((t) => t.symbol.toLowerCase().includes(searchQuery.toLowerCase().trim()));
 
+  const tickerList =
+    activeTab === "hot"
+      ? [...baseTickerList].sort((a, b) => Math.abs(b.change) - Math.abs(a.change))
+      : baseTickerList;
+
+  const activeAlertCount = alerts.filter((a) => a.active).length;
+
+  const markPricesMap: Record<string, number> = {};
+  Object.values(tickers).forEach((t) => {
+    markPricesMap[t.symbol] = t.price;
+  });
+  markPricesMap[selectedSymbol] = currentPrice;
+
+  const equitySummary = calculateAccountEquity(paperAccount, markPricesMap);
+  const openTradeCount = paperAccount.positions.length + paperAccount.orders.length;
+
   return (
-    <aside className="w-80 bg-surface-container-lowest border-l border-border flex flex-col h-full select-none shrink-0 z-20">
+    <aside className="w-80 bg-surface-container-lowest border-l border-border flex flex-col h-full select-none shrink-0 z-20 relative">
+      {/* Floating Alert Triggered Toast Banner (DEC-069) */}
+      {activeToast && (
+        <div className="fixed top-14 right-6 z-50 w-80 bg-surface-container-high border-2 border-gold rounded-lg shadow-2xl p-3 font-mono text-xs animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 text-gold font-bold">
+              <BellRing size={15} className="animate-bounce shrink-0" />
+              <span>ALERT TRIGGERED · {activeToast.symbol.replace("USDT", "/USDT")}</span>
+            </div>
+            <button
+              onClick={() => setActiveToast(null)}
+              className="text-muted hover:text-on-surface p-0.5 cursor-pointer"
+            >
+              <X size={13} />
+            </button>
+          </div>
+          <div className="mt-1.5 text-on-surface font-semibold">{activeToast.label}</div>
+          <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+            <span>
+              Crossed @{" "}
+              <strong className="text-secondary">
+                ${activeToast.triggerPrice >= 1 ? activeToast.triggerPrice.toFixed(2) : activeToast.triggerPrice.toFixed(4)}
+              </strong>
+            </span>
+            <span>{new Date(activeToast.triggeredAt).toLocaleTimeString()}</span>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar Header & Tabs */}
-      <div className="flex items-center justify-between border-b border-border bg-surface px-2 py-1.5">
-        <div className="flex items-center gap-1 bg-surface-container-low p-0.5 rounded border border-border">
+      <div className="flex items-center justify-between border-b border-border bg-surface px-1.5 py-1.5">
+        <div className="flex items-center gap-0.5 bg-surface-container-low p-0.5 rounded border border-border">
           <button
             onClick={() => setActiveTab("watchlist")}
-            className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors flex items-center gap-1 ${
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
               activeTab === "watchlist"
                 ? "bg-primary-container text-white shadow-xs"
                 : "text-muted hover:text-on-surface"
             }`}
           >
-            <Star size={12} />
-            <span>Watchlist</span>
+            <Star size={10} />
+            <span>List</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("trade")}
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+              activeTab === "trade"
+                ? "bg-primary-container text-white shadow-xs"
+                : "text-muted hover:text-on-surface"
+            }`}
+          >
+            <TrendingUp size={10} className={openTradeCount > 0 ? "text-secondary" : ""} />
+            <span>Trade</span>
+            {openTradeCount > 0 && (
+              <span className="px-1 py-0.2 rounded-full bg-secondary/20 text-secondary border border-secondary/40 text-[9px] font-bold">
+                {openTradeCount}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab("alerts")}
-            className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors flex items-center gap-1 ${
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
               activeTab === "alerts"
                 ? "bg-primary-container text-white shadow-xs"
                 : "text-muted hover:text-on-surface"
             }`}
           >
-            <Bell size={12} />
+            <Bell size={10} className={activeAlertCount > 0 ? "text-gold" : ""} />
             <span>Alerts</span>
+            {activeAlertCount > 0 && (
+              <span className="px-1 py-0.2 rounded-full bg-gold/20 text-gold border border-gold/40 text-[9px] font-bold">
+                {activeAlertCount}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab("objects");
+              window.dispatchEvent(new CustomEvent("mochex:request-drawings-sync"));
+            }}
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+              activeTab === "objects"
+                ? "bg-primary-container text-white shadow-xs"
+                : "text-muted hover:text-on-surface"
+            }`}
+          >
+            <Layers size={10} />
+            <span>Objects</span>
+            {activeIndicators.length + chartDrawings.length > 0 && (
+              <span className="px-1 py-0.2 rounded-full bg-surface-container-high text-primary border border-primary/30 text-[9px] font-bold">
+                {activeIndicators.length + chartDrawings.length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab("hot")}
-            className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition-colors flex items-center gap-1 ${
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
               activeTab === "hot"
                 ? "bg-primary-container text-white shadow-xs"
                 : "text-muted hover:text-on-surface"
             }`}
           >
-            <Flame size={12} />
-            <span>Hot 24h</span>
+            <Flame size={10} />
+            <span>Hot</span>
           </button>
         </div>
 
@@ -240,125 +805,1069 @@ export function RightSidebar({
         </button>
       </div>
 
-      {/* Named Watchlist Selector Ribbon */}
-      <div className="px-2.5 py-1.5 border-b border-border bg-surface-container-low flex items-center justify-between text-xs font-mono">
-        <div className="relative">
-          <button
-            onClick={() => setIsListDropdownOpen(!isListDropdownOpen)}
-            className="flex items-center gap-1 text-on-surface hover:text-primary font-semibold transition-colors"
-          >
-            <List size={12} className="text-muted" />
-            <span>{activeListName}</span>
-            <ChevronDown size={11} className="text-muted" />
-          </button>
+      {activeTab === "trade" ? (
+        <div className="flex-1 flex flex-col overflow-hidden font-mono text-xs">
+          {/* Paper Account Equity Header */}
+          <div className="px-3 py-2 border-b border-border bg-surface-container-low flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <TrendingUp size={13} className="text-secondary" />
+                <span className="text-[11px] font-bold uppercase tracking-wider text-on-surface">
+                  Paper Trading · {selectedSymbol.replace("USDT", "/USDT")}
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  const fresh = createInitialPaperAccount(100000);
+                  savePaperAccount(fresh);
+                  setTradeFeedback("Paper account reset to $100,000.00");
+                }}
+                title="Reset Paper Account to $100,000"
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface border border-border text-[9px] text-muted hover:text-on-surface cursor-pointer"
+              >
+                <RotateCcw size={10} />
+                <span>Reset $100k</span>
+              </button>
+            </div>
 
-          {isListDropdownOpen && (
-            <div className="absolute top-full left-0 mt-1 w-44 bg-surface-container-low border border-border rounded shadow-xl py-1 z-50">
-              {availableLists.map((name) => (
-                <button
-                  key={name}
-                  onClick={() => {
-                    setActiveListName(name);
-                    setIsListDropdownOpen(false);
-                  }}
-                  className={`w-full text-left px-2.5 py-1.5 text-xs hover:bg-surface-container transition-colors ${
-                    name === activeListName ? "text-primary font-bold" : "text-on-surface"
+            <div className="grid grid-cols-3 gap-1.5 bg-surface p-1.5 rounded border border-border/60 text-[10px]">
+              <div>
+                <div className="text-muted text-[9px] uppercase">Equity</div>
+                <div className="font-bold text-on-surface">
+                  ${equitySummary.equity.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div>
+                <div className="text-muted text-[9px] uppercase">Unrealized</div>
+                <div
+                  className={`font-bold ${
+                    equitySummary.unrealizedPnl >= 0 ? "text-secondary" : "text-tertiary"
                   }`}
                 >
-                  {name}
-                </button>
-              ))}
+                  {equitySummary.unrealizedPnl >= 0 ? "+" : ""}$
+                  {equitySummary.unrealizedPnl.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-muted text-[9px] uppercase">Free Margin</div>
+                <div className="font-semibold text-on-surface">
+                  ${equitySummary.freeMargin.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                </div>
+              </div>
             </div>
-          )}
-        </div>
 
-        <span className="text-[10px] text-muted">{tickerList.length} pairs</span>
-      </div>
+            {tradeFeedback && (
+              <div className="px-2 py-1 rounded bg-primary/15 border border-primary/40 text-primary text-[10px] font-semibold flex items-center justify-between">
+                <span className="truncate">{tradeFeedback}</span>
+                <button
+                  onClick={() => setTradeFeedback(null)}
+                  className="text-muted hover:text-on-surface ml-1 cursor-pointer"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            )}
+          </div>
 
-      {/* Search Input + Add Pair Action */}
-      <div className="p-2 border-b border-border bg-surface-container-lowest flex items-center gap-2">
-        <div className="flex-1 relative flex items-center">
-          <Search size={13} className="absolute left-2.5 text-muted pointer-events-none" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search pair in list..."
-            className="w-full bg-surface-container-low text-on-surface placeholder-muted text-xs font-mono pl-7 pr-2 py-1.5 rounded border border-outline-variant/30 focus:outline-hidden focus:border-primary-container transition-colors"
-          />
-        </div>
-        <button
-          onClick={() => setIsAddPairOpen(true)}
-          title="Add MEXC Spot Pair to Watchlist"
-          className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-primary border border-outline-variant/30 transition-colors shrink-0"
-        >
-          <Plus size={14} />
-        </button>
-      </div>
+          {/* Order Execution Ticket Form */}
+          <form
+            onSubmit={handleSubmitPaperOrder}
+            className="p-2.5 border-b border-border bg-surface-container-lowest flex flex-col gap-2"
+          >
+            {/* Side Switcher: BUY / LONG vs SELL / SHORT */}
+            <div className="grid grid-cols-2 gap-1 bg-surface p-0.5 rounded border border-border">
+              <button
+                type="button"
+                onClick={() => setOrderSide("long")}
+                className={`py-1.5 rounded text-[11px] font-bold uppercase transition-colors cursor-pointer ${
+                  orderSide === "long"
+                    ? "bg-[#00c087] text-[#06121c] shadow-xs"
+                    : "text-muted hover:text-on-surface"
+                }`}
+              >
+                Buy / Long
+              </button>
+              <button
+                type="button"
+                onClick={() => setOrderSide("short")}
+                className={`py-1.5 rounded text-[11px] font-bold uppercase transition-colors cursor-pointer ${
+                  orderSide === "short"
+                    ? "bg-[#ff3b30] text-white shadow-xs"
+                    : "text-muted hover:text-on-surface"
+                }`}
+              >
+                Sell / Short
+              </button>
+            </div>
 
-      {/* Ticker Table Header */}
-      <div className="grid grid-cols-12 px-3 py-1.5 text-[10px] font-mono text-muted uppercase tracking-wider border-b border-border bg-surface-container-lowest">
-        <span className="col-span-5 text-left">Symbol / Vol</span>
-        <span className="col-span-4 text-right">Last Price</span>
-        <span className="col-span-3 text-right">24h Chg</span>
-      </div>
+            {/* Order Type & Leverage Row */}
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1 bg-surface p-0.5 rounded border border-border">
+                <button
+                  type="button"
+                  onClick={() => setOrderType("market")}
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer ${
+                    orderType === "market"
+                      ? "bg-primary-container text-white"
+                      : "text-muted hover:text-on-surface"
+                  }`}
+                >
+                  Market
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOrderType("limit");
+                    if (!orderLimitPrice) {
+                      setOrderLimitPrice(
+                        currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
+                      );
+                    }
+                  }}
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer ${
+                    orderType === "limit"
+                      ? "bg-primary-container text-white"
+                      : "text-muted hover:text-on-surface"
+                  }`}
+                >
+                  Limit
+                </button>
+              </div>
 
-      {/* High-Density Ticker Rows */}
-      <div className="flex-1 overflow-y-auto no-scrollbar">
-        {tickerList.map((t) => {
-          const isSelected = t.symbol === selectedSymbol;
-          const isPositive = t.change >= 0;
-          return (
-            <div
-              key={t.symbol}
-              onClick={() => onSelectSymbol(t.symbol)}
-              className={`grid grid-cols-12 items-center px-3 py-2 cursor-pointer transition-colors border-b border-border/40 group ${
-                isSelected
-                  ? "bg-surface-container-high border-l-2 border-l-primary-container"
-                  : "hover:bg-surface-container-low"
+              <div className="flex items-center gap-0.5 bg-surface p-0.5 rounded border border-border">
+                {[1, 2, 5, 10, 20].map((lev) => (
+                  <button
+                    key={lev}
+                    type="button"
+                    onClick={() => setOrderLeverage(lev)}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
+                      orderLeverage === lev
+                        ? "bg-gold/20 text-gold border border-gold/40"
+                        : "text-muted hover:text-on-surface"
+                    }`}
+                  >
+                    {lev}x
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Limit Price Input (Only if Limit) */}
+            {orderType === "limit" && (
+              <div className="relative flex items-center">
+                <span className="absolute left-2 text-[10px] text-muted">Limit $</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={orderLimitPrice}
+                  onChange={(e) => setOrderLimitPrice(e.target.value)}
+                  placeholder="Limit entry price..."
+                  className="w-full bg-surface text-on-surface text-[11px] pl-14 pr-12 py-1 rounded border border-border focus:outline-hidden focus:border-primary text-right"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOrderLimitPrice(
+                      currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
+                    )
+                  }
+                  className="absolute right-1.5 text-[9px] px-1 py-0.5 rounded bg-surface-container-high text-muted hover:text-on-surface cursor-pointer"
+                >
+                  Last
+                </button>
+              </div>
+            )}
+
+            {/* Margin Collateral Input + Quick % Buttons */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between text-[10px] text-muted">
+                <span>Margin (USDT)</span>
+                <span>
+                  Notional:{" "}
+                  <strong className="text-on-surface">
+                    ${((parseFloat(orderMarginUsdt) || 0) * orderLeverage).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                  </strong>
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="any"
+                  value={orderMarginUsdt}
+                  onChange={(e) => setOrderMarginUsdt(e.target.value)}
+                  className="flex-1 bg-surface text-on-surface text-[11px] px-2 py-1 rounded border border-border focus:outline-hidden focus:border-primary"
+                />
+                {[0.1, 0.25, 0.5, 1].map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() =>
+                      setOrderMarginUsdt(
+                        Math.max(10, Math.floor(equitySummary.freeMargin * pct)).toString()
+                      )
+                    }
+                    className="px-1.5 py-1 rounded bg-surface border border-border text-[9px] text-muted hover:text-on-surface cursor-pointer"
+                  >
+                    {pct * 100}%
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Optional Take Profit & Stop Loss Inputs */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <div>
+                <div className="text-[9px] text-secondary uppercase mb-0.5">Take Profit ($)</div>
+                <input
+                  type="number"
+                  step="any"
+                  value={orderTp}
+                  onChange={(e) => setOrderTp(e.target.value)}
+                  placeholder="Optional TP"
+                  className="w-full bg-surface text-on-surface text-[11px] px-2 py-1 rounded border border-border focus:outline-hidden focus:border-secondary"
+                />
+              </div>
+              <div>
+                <div className="text-[9px] text-tertiary uppercase mb-0.5">Stop Loss ($)</div>
+                <input
+                  type="number"
+                  step="any"
+                  value={orderSl}
+                  onChange={(e) => setOrderSl(e.target.value)}
+                  placeholder="Optional SL"
+                  className="w-full bg-surface text-on-surface text-[11px] px-2 py-1 rounded border border-border focus:outline-hidden focus:border-tertiary"
+                />
+              </div>
+            </div>
+
+            {/* Submit Order Button */}
+            <button
+              type="submit"
+              className={`w-full py-1.5 rounded font-bold text-[11px] uppercase tracking-wider transition-colors cursor-pointer shadow-sm ${
+                orderSide === "long"
+                  ? "bg-[#00c087] hover:bg-[#00d696] text-[#06121c]"
+                  : "bg-[#ff3b30] hover:bg-[#ff5147] text-white"
               }`}
             >
-              {/* Symbol & Volume */}
-              <div className="col-span-5 flex flex-col">
-                <span className="text-xs font-mono font-bold text-on-surface">
-                  {t.symbol.replace("USDT", "")}
-                  <span className="text-[10px] font-normal text-muted">/USDT</span>
-                </span>
-                <span className="text-[9px] font-mono text-muted">
-                  Vol {t.volume >= 1000 ? `${(t.volume / 1000).toFixed(1)}K` : t.volume.toFixed(0)}
-                </span>
+              {orderType === "market"
+                ? `${orderSide === "long" ? "Buy / Long" : "Sell / Short"} ${selectedSymbol.replace("USDT", "")} @ MKT`
+                : `Place Limit ${orderSide.toUpperCase()} @ $${orderLimitPrice || currentPrice.toFixed(2)}`}
+            </button>
+          </form>
+
+          {/* Positions / Working Orders / Closed History Sub-Tabs */}
+          <div className="grid grid-cols-3 border-b border-border bg-surface text-[10px]">
+            <button
+              onClick={() => setTradeSubTab("positions")}
+              className={`py-1.5 font-semibold border-b-2 transition-colors cursor-pointer ${
+                tradeSubTab === "positions"
+                  ? "border-primary text-primary bg-surface-container-low"
+                  : "border-transparent text-muted hover:text-on-surface"
+              }`}
+            >
+              Positions ({paperAccount.positions.length})
+            </button>
+            <button
+              onClick={() => setTradeSubTab("orders")}
+              className={`py-1.5 font-semibold border-b-2 transition-colors cursor-pointer ${
+                tradeSubTab === "orders"
+                  ? "border-primary text-primary bg-surface-container-low"
+                  : "border-transparent text-muted hover:text-on-surface"
+              }`}
+            >
+              Orders ({paperAccount.orders.length})
+            </button>
+            <button
+              onClick={() => setTradeSubTab("history")}
+              className={`py-1.5 font-semibold border-b-2 transition-colors cursor-pointer ${
+                tradeSubTab === "history"
+                  ? "border-primary text-primary bg-surface-container-low"
+                  : "border-transparent text-muted hover:text-on-surface"
+              }`}
+            >
+              History ({paperAccount.history.length})
+            </button>
+          </div>
+
+          {/* Sub-Tab List Content */}
+          <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-border/40">
+            {tradeSubTab === "positions" ? (
+              paperAccount.positions.length === 0 ? (
+                <div className="p-4 text-center text-[11px] text-muted">
+                  No open paper positions. Execute an order above or click{" "}
+                  <strong className="text-secondary">Trade</strong> on any Long/Short Position chart drawing.
+                </div>
+              ) : (
+                paperAccount.positions.map((pos) => {
+                  const mark = markPricesMap[pos.symbol] ?? pos.entryPrice;
+                  const pnl = calculatePositionUnrealizedPnl(pos, mark);
+                  const isPosProfitable = pnl.unrealizedPnl >= 0;
+
+                  return (
+                    <div
+                      key={pos.id}
+                      className="px-3 py-2 flex flex-col gap-1 bg-surface-container-lowest hover:bg-surface-container-low transition-colors"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase ${
+                              pos.side === "long"
+                                ? "bg-secondary/20 text-secondary border border-secondary/40"
+                                : "bg-tertiary/20 text-tertiary border border-tertiary/40"
+                            }`}
+                          >
+                            {pos.side} {pos.leverage}x
+                          </span>
+                          <span
+                            onClick={() => onSelectSymbol(pos.symbol)}
+                            className="font-bold text-on-surface hover:text-primary cursor-pointer"
+                          >
+                            {pos.symbol.replace("USDT", "/USDT")}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const closed = closePaperPosition(
+                              paperAccountRef.current,
+                              pos.id,
+                              mark,
+                              "manual",
+                              Date.now()
+                            );
+                            savePaperAccount(closed.state);
+                            if (closed.closedTrade) {
+                              const sign = closed.closedTrade.realizedPnl >= 0 ? "+" : "";
+                              setTradeFeedback(
+                                `Closed ${pos.symbol.replace("USDT", "")} (${sign}$${closed.closedTrade.realizedPnl.toFixed(2)})`
+                              );
+                            }
+                          }}
+                          className="px-2 py-0.5 rounded bg-surface-container-high hover:bg-tertiary/20 text-muted hover:text-tertiary border border-border text-[10px] font-semibold cursor-pointer transition-colors"
+                        >
+                          Close MKT
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] text-muted">
+                        <span>
+                          Entry:{" "}
+                          <strong className="text-on-surface">
+                            ${pos.entryPrice >= 1 ? pos.entryPrice.toFixed(2) : pos.entryPrice.toFixed(4)}
+                          </strong>{" "}
+                          · Mark:{" "}
+                          <strong className="text-on-surface">
+                            ${mark >= 1 ? mark.toFixed(2) : mark.toFixed(4)}
+                          </strong>
+                        </span>
+                        <span
+                          className={`font-bold ${
+                            isPosProfitable ? "text-secondary" : "text-tertiary"
+                          }`}
+                        >
+                          {isPosProfitable ? "+" : ""}${pnl.unrealizedPnl.toFixed(2)} (
+                          {isPosProfitable ? "+" : ""}
+                          {pnl.roePercent.toFixed(1)}%)
+                        </span>
+                      </div>
+
+                      {(pos.takeProfit || pos.stopLoss) && (
+                        <div className="flex items-center gap-2 text-[9px] text-muted">
+                          {pos.takeProfit && (
+                            <span className="text-secondary">
+                              TP: ${pos.takeProfit >= 1 ? pos.takeProfit.toFixed(2) : pos.takeProfit.toFixed(4)}
+                            </span>
+                          )}
+                          {pos.stopLoss && (
+                            <span className="text-tertiary">
+                              SL: ${pos.stopLoss >= 1 ? pos.stopLoss.toFixed(2) : pos.stopLoss.toFixed(4)}
+                            </span>
+                          )}
+                          <span>· Margin: ${pos.marginUsed.toFixed(0)}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )
+            ) : tradeSubTab === "orders" ? (
+              paperAccount.orders.length === 0 ? (
+                <div className="p-4 text-center text-[11px] text-muted">
+                  No working limit orders.
+                </div>
+              ) : (
+                paperAccount.orders.map((ord) => (
+                  <div
+                    key={ord.id}
+                    className="px-3 py-2 flex items-center justify-between gap-2 bg-surface-container-lowest"
+                  >
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`px-1 py-0.2 rounded text-[9px] font-bold uppercase ${
+                            ord.side === "long"
+                              ? "bg-secondary/20 text-secondary"
+                              : "bg-tertiary/20 text-tertiary"
+                          }`}
+                        >
+                          LIMIT {ord.side} {ord.leverage}x
+                        </span>
+                        <span className="font-bold text-on-surface">
+                          {ord.symbol.replace("USDT", "/USDT")}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-muted mt-0.5">
+                        Target: <strong className="text-on-surface">${ord.limitPrice.toFixed(2)}</strong> · Margin: ${ord.marginReserved.toFixed(0)}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const next = cancelPaperOrder(paperAccountRef.current, ord.id);
+                        savePaperAccount(next);
+                      }}
+                      className="px-2 py-0.5 rounded bg-surface-container-low hover:bg-tertiary/15 text-muted hover:text-tertiary border border-border text-[10px] cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ))
+              )
+            ) : paperAccount.history.length === 0 ? (
+              <div className="p-4 text-center text-[11px] text-muted">
+                No closed paper trades yet.
+              </div>
+            ) : (
+              paperAccount.history.map((trd) => {
+                const isWin = trd.realizedPnl >= 0;
+                return (
+                  <div
+                    key={trd.id}
+                    className="px-3 py-2 flex items-center justify-between gap-2 bg-surface-container-lowest text-[10px]"
+                  >
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`px-1 py-0.2 rounded text-[9px] font-bold uppercase ${
+                            trd.side === "long"
+                              ? "bg-secondary/20 text-secondary"
+                              : "bg-tertiary/20 text-tertiary"
+                          }`}
+                        >
+                          {trd.side} {trd.leverage}x
+                        </span>
+                        <span className="font-bold text-on-surface">
+                          {trd.symbol.replace("USDT", "/USDT")}
+                        </span>
+                        <span className="text-[9px] px-1 rounded bg-surface-container-high text-muted uppercase">
+                          {trd.exitReason.replace("_", " ")}
+                        </span>
+                      </div>
+                      <div className="text-muted mt-0.5">
+                        ${trd.entryPrice.toFixed(2)} → ${trd.exitPrice.toFixed(2)}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`font-bold ${isWin ? "text-secondary" : "text-tertiary"}`}>
+                        {isWin ? "+" : ""}${trd.realizedPnl.toFixed(2)}
+                      </div>
+                      <div className="text-[9px] text-muted">
+                        {isWin ? "+" : ""}
+                        {trd.realizedPnlPercent.toFixed(1)}%
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      ) : activeTab === "objects" ? (
+        <div className="flex-1 flex flex-col overflow-hidden font-mono">
+          {/* Object Tree Header */}
+          <div className="px-3 py-2 border-b border-border bg-surface-container-low flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Layers size={13} className="text-primary" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-on-surface">
+                Object Tree · {selectedSymbol.replace("USDT", "/USDT")}
+              </span>
+            </div>
+            <span className="text-[10px] text-muted">
+              {activeIndicators.length + chartDrawings.length} layers
+            </span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-border/40">
+            {/* Section 1: Active Technical Indicators */}
+            <div className="bg-surface-container-lowest">
+              <div className="px-3 py-1.5 text-[10px] text-muted uppercase tracking-wider bg-surface flex items-center justify-between">
+                <span>Active Indicators ({activeIndicators.length})</span>
+                <span className="text-[9px] text-primary italic">fx</span>
+              </div>
+              {activeIndicators.length === 0 ? (
+                <div className="px-3 py-2.5 text-[11px] text-muted">
+                  No active indicators on chart.
+                </div>
+              ) : (
+                <div className="divide-y divide-border/30">
+                  {activeIndicators.map((indName) => (
+                    <div
+                      key={indName}
+                      className="px-3 py-2 flex items-center justify-between gap-2 hover:bg-surface-container-low transition-colors"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-2 h-2 rounded-full bg-primary shrink-0" />
+                        <span className="text-xs font-semibold text-on-surface truncate">
+                          {indName}
+                        </span>
+                      </div>
+                      {onToggleIndicator && (
+                        <button
+                          onClick={() => onToggleIndicator(indName)}
+                          title="Remove Indicator"
+                          className="p-1 rounded text-muted hover:text-tertiary hover:bg-tertiary/10 transition-colors cursor-pointer shrink-0"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Section 2: Chart Drawings (Displayed Top-to-Bottom Z-Order) */}
+            <div className="bg-surface-container-lowest">
+              <div className="px-3 py-1.5 text-[10px] text-muted uppercase tracking-wider bg-surface flex items-center justify-between">
+                <span>Drawing Layers ({chartDrawings.length})</span>
+                <span className="text-[9px] text-outline">Top = Front Z-Order</span>
               </div>
 
-              {/* Price */}
-              <div className="col-span-4 text-right font-mono text-xs font-semibold text-on-surface">
-                {t.price >= 1 ? t.price.toFixed(2) : t.price.toFixed(4)}
-              </div>
+              {chartDrawings.length === 0 ? (
+                <div className="p-4 text-center text-[11px] text-muted">
+                  No drawings on {selectedSymbol.replace("USDT", "/USDT")}. Select a tool from the left rail to draw on the canvas.
+                </div>
+              ) : (
+                <div className="divide-y divide-border/30">
+                  {[...chartDrawings].reverse().map((d, revIdx) => {
+                    const isSelected = d.id === selectedDrawingId;
+                    const isEditing = d.id === editingDrawingId;
+                    const isTopMost = revIdx === 0;
+                    const isBottomMost = revIdx === chartDrawings.length - 1;
 
-              {/* Change Pill + Quick Remove */}
-              <div className="col-span-3 flex items-center justify-end gap-1">
-                <span
-                  className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded text-right ${
-                    isPositive
-                      ? "bg-secondary/15 text-secondary border border-secondary/30"
-                      : "bg-tertiary/15 text-tertiary border border-tertiary/30"
-                  }`}
+                    return (
+                      <div
+                        key={d.id}
+                        onClick={() => dispatchObjectTreeAction("select", d.id)}
+                        className={`px-2.5 py-2 flex flex-col gap-1.5 cursor-pointer transition-colors ${
+                          isSelected
+                            ? "bg-surface-container-high border-l-2 border-l-primary-container"
+                            : "hover:bg-surface-container-low"
+                        } ${d.isHidden ? "opacity-55" : ""}`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full border border-border shrink-0"
+                              style={{ backgroundColor: d.color || "#2962ff" }}
+                            />
+                            {isEditing ? (
+                              <form
+                                onSubmit={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  dispatchObjectTreeAction("rename", d.id, {
+                                    name: editingNameValue,
+                                  });
+                                  setEditingDrawingId(null);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex items-center gap-1 flex-1"
+                              >
+                                <input
+                                  type="text"
+                                  value={editingNameValue}
+                                  onChange={(e) => setEditingNameValue(e.target.value)}
+                                  autoFocus
+                                  placeholder="Layer name..."
+                                  className="w-full bg-surface text-on-surface text-[11px] px-1.5 py-0.5 rounded border border-primary focus:outline-hidden"
+                                />
+                                <button
+                                  type="submit"
+                                  className="p-0.5 rounded bg-primary text-white cursor-pointer"
+                                  title="Save Name"
+                                >
+                                  <Check size={11} />
+                                </button>
+                              </form>
+                            ) : (
+                              <span
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingDrawingId(d.id);
+                                  setEditingNameValue(d.name || formatDrawingObjectLabel(d));
+                                }}
+                                className={`text-xs font-semibold truncate ${
+                                  d.isHidden ? "line-through text-muted" : "text-on-surface"
+                                }`}
+                                title="Click to select · Double-click to rename"
+                              >
+                                {formatDrawingObjectLabel(d)}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Layer Action Controls */}
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center gap-0.5 shrink-0"
+                          >
+                            {/* Rename button */}
+                            <button
+                              onClick={() => {
+                                setEditingDrawingId(d.id);
+                                setEditingNameValue(d.name || formatDrawingObjectLabel(d));
+                              }}
+                              title="Rename Layer"
+                              className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                            >
+                              <Edit3 size={11} />
+                            </button>
+
+                            {/* Bring Forward (Move Up in Z-order) */}
+                            <button
+                              onClick={() =>
+                                dispatchObjectTreeAction("reorder", d.id, {
+                                  direction: "forward",
+                                })
+                              }
+                              disabled={isTopMost}
+                              title="Bring Forward"
+                              className={`p-1 rounded ${
+                                isTopMost
+                                  ? "text-muted/25 cursor-not-allowed"
+                                  : "text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                              }`}
+                            >
+                              <ChevronUp size={11} />
+                            </button>
+
+                            {/* Send Backward (Move Down in Z-order) */}
+                            <button
+                              onClick={() =>
+                                dispatchObjectTreeAction("reorder", d.id, {
+                                  direction: "backward",
+                                })
+                              }
+                              disabled={isBottomMost}
+                              title="Send Backward"
+                              className={`p-1 rounded ${
+                                isBottomMost
+                                  ? "text-muted/25 cursor-not-allowed"
+                                  : "text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                              }`}
+                            >
+                              <ChevronDown size={11} />
+                            </button>
+
+                            {/* Visibility Eye Toggle */}
+                            <button
+                              onClick={() => dispatchObjectTreeAction("toggle_hide", d.id)}
+                              title={d.isHidden ? "Show Layer" : "Hide Layer"}
+                              className={`p-1 rounded cursor-pointer ${
+                                d.isHidden
+                                  ? "text-tertiary bg-tertiary/10"
+                                  : "text-muted hover:text-on-surface hover:bg-surface"
+                              }`}
+                            >
+                              {d.isHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+                            </button>
+
+                            {/* Lock Toggle */}
+                            <button
+                              onClick={() => dispatchObjectTreeAction("toggle_lock", d.id)}
+                              title={d.isLocked ? "Unlock Layer" : "Lock Layer"}
+                              className={`p-1 rounded cursor-pointer ${
+                                d.isLocked
+                                  ? "text-gold bg-gold/10"
+                                  : "text-muted hover:text-on-surface hover:bg-surface"
+                              }`}
+                            >
+                              {d.isLocked ? <Lock size={11} /> : <Unlock size={11} />}
+                            </button>
+
+                            {/* Clone / Duplicate */}
+                            <button
+                              onClick={() => dispatchObjectTreeAction("clone", d.id)}
+                              title="Clone / Duplicate Layer (Ctrl+D)"
+                              className="p-1 rounded text-muted hover:text-primary hover:bg-surface cursor-pointer"
+                            >
+                              <Copy size={11} />
+                            </button>
+
+                            {/* Open 3-Tab Settings Modal */}
+                            <button
+                              onClick={() => dispatchObjectTreeAction("open_settings", d.id)}
+                              title="Layer Settings"
+                              className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer"
+                            >
+                              <Settings2 size={11} />
+                            </button>
+
+                            {/* Delete Layer */}
+                            <button
+                              onClick={() => dispatchObjectTreeAction("delete", d.id)}
+                              disabled={d.isLocked}
+                              title={d.isLocked ? "Unlock to Delete" : "Delete Layer"}
+                              className={`p-1 rounded ${
+                                d.isLocked
+                                  ? "opacity-30 cursor-not-allowed"
+                                  : "text-muted hover:text-tertiary hover:bg-tertiary/10 cursor-pointer"
+                              }`}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : activeTab === "alerts" ? (
+        <div className="flex-1 flex flex-col overflow-hidden font-mono">
+          {/* Create Alert Form */}
+          <form
+            onSubmit={handleCreateManualAlert}
+            className="p-2.5 border-b border-border bg-surface-container-low flex flex-col gap-2"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-on-surface">
+                + Price Alert ({selectedSymbol.replace("USDT", "/USDT")})
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsSoundEnabled((prev) => !prev)}
+                title={isSoundEnabled ? "Chime Sound Enabled" : "Chime Sound Muted"}
+                className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border cursor-pointer transition-colors ${
+                  isSoundEnabled
+                    ? "bg-gold/15 text-gold border-gold/30"
+                    : "bg-surface text-muted border-border"
+                }`}
+              >
+                {isSoundEnabled ? <Volume2 size={11} /> : <VolumeX size={11} />}
+                <span>{isSoundEnabled ? "Chime On" : "Muted"}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-12 gap-1.5">
+              <div className="col-span-5">
+                <select
+                  value={newAlertCondition}
+                  onChange={(e) => setNewAlertCondition(e.target.value as AlertCondition)}
+                  className="w-full bg-surface text-on-surface text-[11px] px-1.5 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
                 >
-                  {isPositive ? "+" : ""}
-                  {t.change.toFixed(2)}%
-                </span>
-
+                  <option value="crossing">Crossing</option>
+                  <option value="crossing_up">Cross Up</option>
+                  <option value="crossing_down">Cross Down</option>
+                </select>
+              </div>
+              <div className="col-span-7 relative flex items-center">
+                <input
+                  type="number"
+                  step="any"
+                  value={newAlertPrice}
+                  onChange={(e) => setNewAlertPrice(e.target.value)}
+                  placeholder="Target Price..."
+                  className="w-full bg-surface text-on-surface text-[11px] pl-2 pr-12 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
+                />
                 <button
-                  onClick={(e) => handleRemoveSymbol(t.symbol, e)}
-                  title="Remove from watchlist"
-                  className="hidden group-hover:block text-muted hover:text-tertiary transition-colors ml-1"
+                  type="button"
+                  onClick={() =>
+                    setNewAlertPrice(
+                      currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
+                    )
+                  }
+                  className="absolute right-1.5 text-[9px] px-1 py-0.5 rounded bg-surface-container-high text-muted hover:text-on-surface cursor-pointer"
+                  title="Set to current mark price"
                 >
-                  <Trash2 size={11} />
+                  Last
                 </button>
               </div>
             </div>
-          );
-        })}
-      </div>
+
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={newAlertLabel}
+                onChange={(e) => setNewAlertLabel(e.target.value)}
+                placeholder="Alert note (optional)..."
+                className="flex-1 bg-surface text-on-surface placeholder-muted text-[11px] px-2 py-1 rounded border border-border focus:outline-hidden focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setNewAlertFrequency((f) =>
+                    f === "only_once" ? "every_time" : "only_once"
+                  )
+                }
+                className="px-2 py-1 rounded text-[10px] bg-surface border border-border text-muted hover:text-on-surface shrink-0 cursor-pointer"
+                title="Toggle Trigger Frequency"
+              >
+                {newAlertFrequency === "only_once" ? "Once" : "Every Time"}
+              </button>
+              <button
+                type="submit"
+                className="px-2.5 py-1 rounded bg-primary-container hover:bg-primary text-white text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer transition-colors"
+              >
+                <Plus size={12} />
+                <span>Add</span>
+              </button>
+            </div>
+          </form>
+
+          {/* Active & Paused Alerts List */}
+          <div className="px-3 py-1.5 text-[10px] text-muted uppercase tracking-wider border-b border-border bg-surface-container-lowest flex items-center justify-between">
+            <span>Configured Alerts ({alerts.length})</span>
+            <span className="text-[9px] text-outline">Click 🔔 on drawings to link</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-border/40">
+            {alerts.length === 0 ? (
+              <div className="p-4 text-center text-[11px] text-muted">
+                No alerts configured yet. Add a price level above or select any chart drawing and click the{" "}
+                <strong className="text-gold">Bell +</strong> icon.
+              </div>
+            ) : (
+              alerts.map((a) => {
+                const formattedTarget =
+                  a.targetPrice >= 1 ? a.targetPrice.toFixed(2) : a.targetPrice.toFixed(4);
+                return (
+                  <div
+                    key={a.id}
+                    className={`px-3 py-2 flex items-center justify-between gap-2 transition-colors ${
+                      a.active ? "bg-surface-container-lowest" : "bg-surface-container-low/40 opacity-60"
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          onClick={() => onSelectSymbol(a.symbol)}
+                          className="text-[10px] font-bold text-primary hover:underline cursor-pointer"
+                        >
+                          {a.symbol.replace("USDT", "/USDT")}
+                        </span>
+                        <span className="text-[9px] px-1 py-0.2 rounded bg-surface-container-high text-muted uppercase">
+                          {a.sourceType.replace("_", " ")}
+                        </span>
+                        <span
+                          className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
+                            a.active
+                              ? "bg-gold/15 text-gold border border-gold/30"
+                              : "bg-surface text-muted border border-border"
+                          }`}
+                        >
+                          {a.active ? "ACTIVE" : "PAUSED"}
+                        </span>
+                      </div>
+                      <div className="text-xs font-semibold text-on-surface truncate mt-0.5">
+                        {a.label}
+                      </div>
+                      <div className="text-[10px] text-muted flex items-center gap-2 mt-0.5">
+                        <span>
+                          {a.condition.replace("_", " ").toUpperCase()} @{" "}
+                          <strong className="text-on-surface">${formattedTarget}</strong>
+                        </span>
+                        <span>· {a.frequency === "only_once" ? "Once" : "Every 60s"}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleToggleAlertActive(a.id)}
+                        title={a.active ? "Pause Alert" : "Resume Alert"}
+                        className="p-1 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border border-border cursor-pointer"
+                      >
+                        {a.active ? <Pause size={11} /> : <Play size={11} />}
+                      </button>
+                      <button
+                        onClick={() => handleDeleteAlert(a.id)}
+                        title="Delete Alert"
+                        className="p-1 rounded bg-surface-container-low hover:bg-tertiary/15 text-muted hover:text-tertiary border border-border cursor-pointer"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Triggered Alert Log Section */}
+          <div className="h-36 border-t border-border bg-surface flex flex-col shrink-0">
+            <div className="px-3 py-1 text-[10px] text-muted uppercase tracking-wider border-b border-border flex items-center justify-between">
+              <span>Triggered Alert Log ({alertLogs.length})</span>
+              {alertLogs.length > 0 && (
+                <button
+                  onClick={() => saveAlertLogs([])}
+                  className="text-[9px] text-muted hover:text-tertiary cursor-pointer"
+                >
+                  Clear Log
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-border/30">
+              {alertLogs.length === 0 ? (
+                <div className="p-3 text-center text-[10px] text-muted">
+                  Waiting for live price crossings...
+                </div>
+              ) : (
+                alertLogs.map((log) => (
+                  <div key={log.id} className="px-3 py-1.5 text-[10px] flex items-center justify-between">
+                    <div className="truncate pr-2">
+                      <span className="text-gold font-bold mr-1">🔔 {log.symbol.replace("USDT", "")}</span>
+                      <span className="text-on-surface">{log.label}</span>
+                    </div>
+                    <div className="text-right shrink-0 text-muted">
+                      <div className="text-secondary font-semibold">
+                        ${log.triggerPrice >= 1 ? log.triggerPrice.toFixed(2) : log.triggerPrice.toFixed(4)}
+                      </div>
+                      <div className="text-[9px]">
+                        {new Date(log.triggeredAt).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Named Watchlist Selector Ribbon */}
+          <div className="px-2.5 py-1.5 border-b border-border bg-surface-container-low flex items-center justify-between text-xs font-mono">
+            <div className="relative">
+              <button
+                onClick={() => setIsListDropdownOpen(!isListDropdownOpen)}
+                className="flex items-center gap-1 text-on-surface hover:text-primary font-semibold transition-colors"
+              >
+                <List size={12} className="text-muted" />
+                <span>{activeTab === "hot" ? "24h Volatility Leaders" : activeListName}</span>
+                <ChevronDown size={11} className="text-muted" />
+              </button>
+
+              {isListDropdownOpen && (
+                <div className="absolute top-full left-0 mt-1 w-44 bg-surface-container-low border border-border rounded shadow-xl py-1 z-50">
+                  {availableLists.map((name) => (
+                    <button
+                      key={name}
+                      onClick={() => {
+                        setActiveListName(name);
+                        setIsListDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 text-xs hover:bg-surface-container transition-colors ${
+                        name === activeListName ? "text-primary font-bold" : "text-on-surface"
+                      }`}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <span className="text-[10px] text-muted">{tickerList.length} pairs</span>
+          </div>
+
+          {/* Search Input + Add Pair Action */}
+          <div className="p-2 border-b border-border bg-surface-container-lowest flex items-center gap-2">
+            <div className="flex-1 relative flex items-center">
+              <Search size={13} className="absolute left-2.5 text-muted pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search pair in list..."
+                className="w-full bg-surface-container-low text-on-surface placeholder-muted text-xs font-mono pl-7 pr-2 py-1.5 rounded border border-outline-variant/30 focus:outline-hidden focus:border-primary-container transition-colors"
+              />
+            </div>
+            <button
+              onClick={() => setIsAddPairOpen(true)}
+              title="Add MEXC Spot Pair to Watchlist"
+              className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-primary border border-outline-variant/30 transition-colors shrink-0"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+
+          {/* Ticker Table Header */}
+          <div className="grid grid-cols-12 px-3 py-1.5 text-[10px] font-mono text-muted uppercase tracking-wider border-b border-border bg-surface-container-lowest">
+            <span className="col-span-5 text-left">Symbol / Vol</span>
+            <span className="col-span-4 text-right">Last Price</span>
+            <span className="col-span-3 text-right">24h Chg</span>
+          </div>
+
+          {/* High-Density Ticker Rows */}
+          <div className="flex-1 overflow-y-auto no-scrollbar">
+            {tickerList.map((t) => {
+              const isSelected = t.symbol === selectedSymbol;
+              const isPositive = t.change >= 0;
+              return (
+                <div
+                  key={t.symbol}
+                  onClick={() => onSelectSymbol(t.symbol)}
+                  className={`grid grid-cols-12 items-center px-3 py-2 cursor-pointer transition-colors border-b border-border/40 group ${
+                    isSelected
+                      ? "bg-surface-container-high border-l-2 border-l-primary-container"
+                      : "hover:bg-surface-container-low"
+                  }`}
+                >
+                  {/* Symbol & Volume */}
+                  <div className="col-span-5 flex flex-col">
+                    <span className="text-xs font-mono font-bold text-on-surface">
+                      {t.symbol.replace("USDT", "")}
+                      <span className="text-[10px] font-normal text-muted">/USDT</span>
+                    </span>
+                    <span className="text-[9px] font-mono text-muted">
+                      Vol {t.volume >= 1000 ? `${(t.volume / 1000).toFixed(1)}K` : t.volume.toFixed(0)}
+                    </span>
+                  </div>
+
+                  {/* Price */}
+                  <div className="col-span-4 text-right font-mono text-xs font-semibold text-on-surface">
+                    {t.price >= 1 ? t.price.toFixed(2) : t.price.toFixed(4)}
+                  </div>
+
+                  {/* Change Pill + Quick Remove */}
+                  <div className="col-span-3 flex items-center justify-end gap-1">
+                    <span
+                      className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded text-right ${
+                        isPositive
+                          ? "bg-secondary/15 text-secondary border border-secondary/30"
+                          : "bg-tertiary/15 text-tertiary border border-tertiary/30"
+                      }`}
+                    >
+                      {isPositive ? "+" : ""}
+                      {t.change.toFixed(2)}%
+                    </span>
+
+                    <button
+                      onClick={(e) => handleRemoveSymbol(t.symbol, e)}
+                      title="Remove from watchlist"
+                      className="hidden group-hover:block text-muted hover:text-tertiary transition-colors ml-1"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {/* Mini Order Depth Ladder Component */}
       <OrderDepthLadder symbol={selectedSymbol} currentPrice={currentPrice} />

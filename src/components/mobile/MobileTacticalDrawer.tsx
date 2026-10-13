@@ -11,8 +11,10 @@ import {
   Sliders,
   Brush,
   Type,
-  Maximize2,
-  Ruler,
+  ArrowUpRight,
+  ArrowDownRight,
+  Square,
+  CalendarRange,
   Magnet,
   Trash2,
 } from "lucide-react";
@@ -51,11 +53,13 @@ export function MobileTacticalDrawer({
   const drawingTools: Array<{ id: DrawingToolType; label: string; icon: React.ReactNode }> = [
     { id: "crosshair", label: "Crosshair", icon: <Crosshair size={18} /> },
     { id: "trendline", label: "Trendline", icon: <TrendingUp size={18} /> },
+    { id: "rectangle", label: "Rectangle", icon: <Square size={18} /> },
+    { id: "long_position", label: "Long Pos", icon: <ArrowUpRight size={18} /> },
+    { id: "short_position", label: "Short Pos", icon: <ArrowDownRight size={18} /> },
+    { id: "date_range", label: "Date Range", icon: <CalendarRange size={18} /> },
     { id: "fibonacci", label: "Fibonacci", icon: <Sliders size={18} /> },
     { id: "brush", label: "Brush", icon: <Brush size={18} /> },
     { id: "text", label: "Annotation", icon: <Type size={18} /> },
-    { id: "position", label: "Position Ruler", icon: <Maximize2 size={18} /> },
-    { id: "ruler", label: "Measure", icon: <Ruler size={18} /> },
   ];
 
   return (

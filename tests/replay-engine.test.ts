@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { BarReplayEngine } from "@/lib/replay/replay-engine";
+import { BarReplayEngine, getIntrabarPricePath } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 
-describe("BarReplayEngine State Machine & Cursor Control", () => {
+describe("BarReplayEngine State Machine, Scissor-Cut & Intrabar Path (DEC-073)", () => {
   let engine: BarReplayEngine;
   const mockBars: Bar[] = [
     { time: 1000, open: 10, high: 12, low: 9, close: 11, volume: 100 },
@@ -35,12 +35,26 @@ describe("BarReplayEngine State Machine & Cursor Control", () => {
     expect(engine.getVisibleBars().length).toBe(3); // bars 0, 1, 2
   });
 
-  it("should step forward one bar at a time", () => {
-    engine.setCutoffTime(2000); // cursor at 1
+  it("should jump directly to any bar index via setCursorIndex for timeline scrubbing", () => {
+    engine.setCursorIndex(1);
+    expect(engine.getState()).toBe("PAUSED");
     expect(engine.getCursorIndex()).toBe(1);
+    expect(engine.getCurrentBar()?.time).toBe(2000);
+    expect(engine.getVisibleBars().length).toBe(2);
+  });
+
+  it("should step forward one bar at a time and pass isForwardStep=true to listeners", () => {
+    engine.setCutoffTime(2000); // cursor at 1
+    let forwardFlag = false;
+    engine.subscribe({
+      onTick: (_bar, _c, _t, isForwardStep) => {
+        forwardFlag = Boolean(isForwardStep);
+      },
+    });
 
     const advanced = engine.stepForward();
     expect(advanced).toBe(true);
+    expect(forwardFlag).toBe(true);
     expect(engine.getCursorIndex()).toBe(2);
     expect(engine.getVisibleBars().length).toBe(3);
   });
@@ -62,11 +76,20 @@ describe("BarReplayEngine State Machine & Cursor Control", () => {
     expect(ended).toBe(true);
   });
 
-  it("should exit replay and reset to IDLE", () => {
+  it("should exit replay and reset to IDLE with full bars restored", () => {
     engine.setCutoffTime(2000);
     engine.exitReplay();
     expect(engine.getState()).toBe("IDLE");
     expect(engine.getCursorIndex()).toBe(-1);
     expect(engine.getVisibleBars().length).toBe(5);
+    expect(engine.getAllBars().length).toBe(5);
+  });
+
+  it("generates accurate intrabar OHLC price trajectories for bullish and bearish candles", () => {
+    const bullishBar: Bar = { time: 1000, open: 100, high: 112, low: 96, close: 108, volume: 50 };
+    expect(getIntrabarPricePath(bullishBar)).toEqual([100, 96, 112, 108]);
+
+    const bearishBar: Bar = { time: 2000, open: 108, high: 115, low: 92, close: 95, volume: 60 };
+    expect(getIntrabarPricePath(bearishBar)).toEqual([108, 115, 92, 95]);
   });
 });
