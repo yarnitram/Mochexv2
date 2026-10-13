@@ -9,7 +9,7 @@ import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
 import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
-import { BacktestTrade } from "@/lib/strategy/types";
+import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
 import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
 import { calculateVisibleVolumeProfile } from "@/lib/indicators/volume-profile";
 import {
@@ -74,6 +74,7 @@ import {
   buildBollingerBandsData,
   buildRsiData,
   buildMacdData,
+  buildStrategyEquitySeriesData,
 } from "@/lib/chart/lightweight-adapter";
 
 interface TradingViewContainerProps {
@@ -87,6 +88,10 @@ interface TradingViewContainerProps {
   activeIndicators?: string[];
   onToggleIndicator?: (name: string) => void;
   trades?: BacktestTrade[];
+  strategyResult?: BacktestPerformance | null;
+  strategyName?: string;
+  focusedTrade?: BacktestTrade | null;
+  onClearStrategy?: () => void;
   onBarsLoaded?: (bars: CandlestickBar[]) => void;
   onPriceUpdate?: (stats: {
     price: number;
@@ -122,6 +127,9 @@ interface HoveredStats {
   macd?: number;
   macdSignal?: number;
   macdHist?: number;
+  strategyEquity?: number;
+  buyAndHoldEquity?: number;
+  strategyDrawdown?: number;
 }
 
 export function TradingViewContainer({
@@ -135,6 +143,10 @@ export function TradingViewContainer({
   activeIndicators = ["EMA Ribbon Momentum Multi-Timeframe"],
   onToggleIndicator,
   trades = [],
+  strategyResult = null,
+  strategyName = "Pine Strategy",
+  focusedTrade = null,
+  onClearStrategy,
   onBarsLoaded,
   onPriceUpdate,
   favoriteTools = [],
@@ -159,6 +171,9 @@ export function TradingViewContainer({
   const macdLineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdSignalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdHistSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const strategyEquitySeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const strategyBuyHoldSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const strategyDrawdownSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   // Sub-pane & Volume Profile configurable parameters (DEC-037, DEC-038, DEC-071)
@@ -172,6 +187,12 @@ export function TradingViewContainer({
 
   const [vpvrRows, setVpvrRows] = useState(24);
   const [vpvrVaPercent, setVpvrVaPercent] = useState(70);
+
+  // Strategy Equity & Underwater Drawdown Overlay toggles (DEC-074)
+  const [showStrategyPane, setShowStrategyPane] = useState(true);
+  const [showBuyHoldBenchmark, setShowBuyHoldBenchmark] = useState(true);
+  const [showUnderwaterDrawdown, setShowUnderwaterDrawdown] = useState(true);
+  const [showTradeConnectors, setShowTradeConnectors] = useState(true);
 
   // Quick settings tuning modal state
   const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | "vpvr" | null>(null);
@@ -386,7 +407,7 @@ export function TradingViewContainer({
     const markersPlugin = createSeriesMarkers(candleSeries, []);
     markersPluginRef.current = markersPlugin;
 
-    // 2.5 Crosshair Hover Telemetry Synchronization (DEC-034)
+    // 2.5 Crosshair Hover Telemetry Synchronization (DEC-034 & DEC-074)
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point) {
         setHoveredStats(null);
@@ -412,6 +433,15 @@ export function TradingViewContainer({
       const macdHistData = macdHistSeriesRef.current
         ? (param.seriesData.get(macdHistSeriesRef.current) as HistogramData<Time> | undefined)
         : undefined;
+      const stratEqData = strategyEquitySeriesRef.current
+        ? (param.seriesData.get(strategyEquitySeriesRef.current) as LineData<Time> | undefined)
+        : undefined;
+      const stratBhData = strategyBuyHoldSeriesRef.current
+        ? (param.seriesData.get(strategyBuyHoldSeriesRef.current) as LineData<Time> | undefined)
+        : undefined;
+      const stratDdData = strategyDrawdownSeriesRef.current
+        ? (param.seriesData.get(strategyDrawdownSeriesRef.current) as HistogramData<Time> | undefined)
+        : undefined;
 
       if (candleData && "open" in candleData) {
         setHoveredStats({
@@ -429,6 +459,9 @@ export function TradingViewContainer({
           macd: macdLineData?.value,
           macdSignal: macdSigData?.value,
           macdHist: macdHistData?.value,
+          strategyEquity: stratEqData?.value,
+          buyAndHoldEquity: stratBhData?.value,
+          strategyDrawdown: stratDdData?.value,
         });
       } else {
         setHoveredStats(null);
@@ -839,7 +872,25 @@ export function TradingViewContainer({
     markersPluginRef.current.setMarkers(markers);
   }, [trades, bars]);
 
-  // 5. Indicator & Sub-Pane Lifecycle Management (DEC-035 to DEC-039)
+  // 4b. Click-to-Focus Trade Inspection on Main Chart (DEC-074)
+  useEffect(() => {
+    if (!focusedTrade || !chartRef.current) return;
+    try {
+      const fromSec = Number(toUtcTimestamp(focusedTrade.entryTime));
+      const toSec = Number(toUtcTimestamp(focusedTrade.exitTime));
+      const resSec = Math.max(60, Math.floor(getResolutionMs(resolution) / 1000));
+      const spanSec = Math.max(resSec * 6, toSec - fromSec);
+      const padSec = Math.max(resSec * 12, Math.floor(spanSec * 1.4));
+      chartRef.current.timeScale().setVisibleRange({
+        from: (fromSec - padSec) as Time,
+        to: (toSec + padSec) as Time,
+      });
+    } catch {
+      // Ignore if visible range is outside loaded bars
+    }
+  }, [focusedTrade, resolution]);
+
+  // 5. Indicator & Sub-Pane Lifecycle Management (DEC-035 to DEC-039, DEC-074)
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -868,6 +919,13 @@ export function TradingViewContainer({
       activeIndicators.includes("Zero-Lag MACD Histogram") ||
       activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
 
+    const hasStrategySubPane = Boolean(
+      strategyResult &&
+        strategyResult.equityCurve &&
+        strategyResult.equityCurve.length > 0 &&
+        showStrategyPane
+    );
+
     // Tear down any existing sub-pane series to ensure deterministic pane order & clean disposal
     if (rsiSeriesRef.current) {
       try {
@@ -892,6 +950,24 @@ export function TradingViewContainer({
         chart.removeSeries(macdHistSeriesRef.current);
       } catch {}
       macdHistSeriesRef.current = null;
+    }
+    if (strategyEquitySeriesRef.current) {
+      try {
+        chart.removeSeries(strategyEquitySeriesRef.current);
+      } catch {}
+      strategyEquitySeriesRef.current = null;
+    }
+    if (strategyBuyHoldSeriesRef.current) {
+      try {
+        chart.removeSeries(strategyBuyHoldSeriesRef.current);
+      } catch {}
+      strategyBuyHoldSeriesRef.current = null;
+    }
+    if (strategyDrawdownSeriesRef.current) {
+      try {
+        chart.removeSeries(strategyDrawdownSeriesRef.current);
+      } catch {}
+      strategyDrawdownSeriesRef.current = null;
     }
 
     let nextPaneIndex = 1;
@@ -1016,6 +1092,87 @@ export function TradingViewContainer({
         panes[macdPaneIndex].setHeight(130);
       }
     }
+
+    // Allocate Strategy Equity Curve & Underwater Drawdown Sub-Pane (DEC-074)
+    if (hasStrategySubPane && strategyResult) {
+      const strategyPaneIndex = nextPaneIndex++;
+
+      // 1. Underwater Drawdown Histogram (Independent Scale in Bottom Half of Sub-Pane)
+      const ddSeries = chart.addSeries(
+        HistogramSeries,
+        {
+          priceScaleId: "strategy_dd",
+          title: "DD%",
+          visible: showUnderwaterDrawdown,
+          priceFormat: {
+            type: "custom",
+            formatter: (val: number) => `${val.toFixed(1)}%`,
+          },
+        },
+        strategyPaneIndex
+      );
+      ddSeries.priceScale().applyOptions({
+        scaleMargins: {
+          top: 0.52,
+          bottom: 0.02,
+        },
+        visible: false,
+      });
+
+      // 2. Buy & Hold Benchmark Curve
+      const bhSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: "rgba(245, 172, 55, 0.85)",
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          priceScaleId: "right",
+          title: "Buy & Hold",
+          visible: showBuyHoldBenchmark,
+        },
+        strategyPaneIndex
+      );
+
+      // 3. Strategy Equity Curve
+      const isPositive = strategyResult.netProfit >= 0;
+      const eqSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: isPositive ? "#00c087" : "#ff3b30",
+          lineWidth: 2,
+          priceScaleId: "right",
+          title: "Equity",
+        },
+        strategyPaneIndex
+      );
+
+      eqSeries.createPriceLine({
+        price: strategyResult.initialCapital,
+        color: "rgba(141, 144, 162, 0.45)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: `Base $${strategyResult.initialCapital.toLocaleString()}`,
+      });
+
+      strategyDrawdownSeriesRef.current = ddSeries;
+      strategyBuyHoldSeriesRef.current = bhSeries;
+      strategyEquitySeriesRef.current = eqSeries;
+
+      const built = buildStrategyEquitySeriesData(
+        strategyResult.equityCurve,
+        barsRef.current,
+        strategyResult.initialCapital
+      );
+      ddSeries.setData(built.underwaterDrawdownHistogram);
+      bhSeries.setData(built.buyAndHoldLine);
+      eqSeries.setData(built.equityLine);
+
+      const panes = chart.panes();
+      if (panes[strategyPaneIndex]) {
+        panes[strategyPaneIndex].setHeight(140);
+      }
+    }
   }, [
     activeIndicators,
     rsiPeriod,
@@ -1024,6 +1181,11 @@ export function TradingViewContainer({
     macdFast,
     macdSlow,
     macdSignal,
+    strategyResult,
+    showStrategyPane,
+    showBuyHoldBenchmark,
+    showUnderwaterDrawdown,
+    bars,
   ]);
 
   // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
@@ -3309,6 +3471,107 @@ export function TradingViewContainer({
       ctx.restore();
     }
 
+    // 5. Strategy Backtest Entry-to-Exit Trade Execution Connectors & PnL Badges (DEC-074)
+    if (showTradeConnectors && trades && trades.length > 0) {
+      for (const trade of trades) {
+        const x1 = timeToCoordinate(trade.entryTime);
+        const y1 = priceToCoordinate(trade.entryPrice);
+        const x2 = timeToCoordinate(trade.exitTime);
+        const y2 = priceToCoordinate(trade.exitPrice);
+
+        if (x1 === null || y1 === null || x2 === null || y2 === null) continue;
+        if (Math.max(x1, x2) < -60 || Math.min(x1, x2) > rect.width + 60) continue;
+
+        const isProfitable = trade.netPnL >= 0;
+        const isFocused = focusedTrade?.tradeId === trade.tradeId;
+        const baseColor = isProfitable ? "#00c087" : "#ff3b30";
+
+        ctx.save();
+
+        // Focused trade highlighted corridor & halo
+        if (isFocused) {
+          ctx.fillStyle = isProfitable
+            ? "rgba(0, 192, 135, 0.08)"
+            : "rgba(255, 59, 48, 0.08)";
+          const rx = Math.min(x1, x2);
+          const ry = Math.min(y1, y2);
+          const rw = Math.max(8, Math.abs(x2 - x1));
+          const rh = Math.max(8, Math.abs(y2 - y1));
+          ctx.fillRect(rx - 4, ry - 4, rw + 8, rh + 8);
+
+          ctx.strokeStyle = isProfitable
+            ? "rgba(0, 192, 135, 0.45)"
+            : "rgba(255, 59, 48, 0.45)";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
+
+        // Dashed Entry-to-Exit connector path
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = isFocused ? 2.2 : 1.4;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Entry node circle
+        ctx.fillStyle = "#0a141f";
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(x1, y1, isFocused ? 4.5 : 3.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Exit node filled circle
+        ctx.fillStyle = baseColor;
+        ctx.beginPath();
+        ctx.arc(x2, y2, isFocused ? 4.5 : 3.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Floating PnL badge at midpoint (always shown when focused or when connector span >= 28px)
+        const spanPx = Math.hypot(x2 - x1, y2 - y1);
+        if (isFocused || spanPx >= 28) {
+          const midX = (x1 + x2) / 2;
+          const midY = Math.min(y1, y2) - (isFocused ? 18 : 13);
+          const sign = isProfitable ? "+" : "";
+          const badgeText = isFocused
+            ? `${trade.direction.toUpperCase()} ${sign}${trade.pnlPercent.toFixed(2)}% (${sign}$${trade.netPnL.toFixed(1)})`
+            : `${sign}${trade.pnlPercent.toFixed(1)}%`;
+
+          ctx.font = isFocused ? "bold 10px monospace" : "bold 9px monospace";
+          const bw = ctx.measureText(badgeText).width + 10;
+          const bh = isFocused ? 18 : 15;
+          const bx = Math.max(4, Math.min(rect.width - bw - 4, midX - bw / 2));
+          const by = Math.max(12, midY - bh / 2);
+
+          ctx.fillStyle = isFocused
+            ? isProfitable
+              ? "rgba(0, 192, 135, 0.95)"
+              : "rgba(255, 59, 48, 0.95)"
+            : "rgba(10, 20, 31, 0.88)";
+          ctx.strokeStyle = baseColor;
+          ctx.lineWidth = isFocused ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.roundRect(bx, by, bw, bh, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = isFocused ? "#0a141f" : baseColor;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(badgeText, bx + bw / 2, by + bh / 2 + 0.5);
+        }
+
+        ctx.restore();
+      }
+    }
+
     ctx.restore();
   }, [
     drawings,
@@ -3319,6 +3582,9 @@ export function TradingViewContainer({
     activeIndicators,
     vpvrRows,
     vpvrVaPercent,
+    trades,
+    focusedTrade,
+    showTradeConnectors,
     symbol,
     selectedDrawingId,
     inFlightDrawing,
@@ -4964,6 +5230,126 @@ export function TradingViewContainer({
                   </div>
                 </div>
               )}
+
+              {strategyResult && strategyResult.equityCurve.length > 0 && (() => {
+                const isProfitable = strategyResult.netProfit >= 0;
+                const eqMetrics = buildStrategyEquitySeriesData(
+                  strategyResult.equityCurve,
+                  bars,
+                  strategyResult.initialCapital
+                );
+                const latestPt =
+                  strategyResult.equityCurve[strategyResult.equityCurve.length - 1];
+                const displayEq = hoveredStats?.strategyEquity ?? latestPt?.equity ?? strategyResult.endingEquity;
+                const displayBh = hoveredStats?.buyAndHoldEquity;
+                const displayDd =
+                  hoveredStats?.strategyDrawdown !== undefined
+                    ? Math.abs(hoveredStats.strategyDrawdown)
+                    : latestPt?.drawdownPercent ?? 0;
+
+                return (
+                  <div className="pointer-events-auto flex flex-wrap items-center gap-2 bg-surface-container-lowest/95 border border-border px-2.5 py-1 rounded text-[11px] font-mono shadow-md backdrop-blur-xs">
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        isProfitable ? "bg-secondary" : "bg-tertiary"
+                      }`}
+                    />
+                    <span className="font-semibold text-on-surface">
+                      {strategyName || "Pine Strategy"}
+                    </span>
+                    <span
+                      className={
+                        isProfitable
+                          ? "text-secondary font-semibold"
+                          : "text-tertiary font-semibold"
+                      }
+                    >
+                      {isProfitable ? "+" : ""}${strategyResult.netProfit.toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}{" "}
+                      ({isProfitable ? "+" : ""}
+                      {strategyResult.netProfitPercent.toFixed(2)}%)
+                    </span>
+                    <span
+                      className={
+                        eqMetrics.alphaPercent >= 0 ? "text-cyan" : "text-muted"
+                      }
+                      title="Strategy Alpha vs. Buy & Hold Benchmark"
+                    >
+                      α {eqMetrics.alphaPercent >= 0 ? "+" : ""}
+                      {eqMetrics.alphaPercent.toFixed(1)}%
+                    </span>
+                    <span className="text-on-surface">
+                      Eq ${displayEq.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </span>
+                    {displayBh !== undefined && showBuyHoldBenchmark && (
+                      <span className="text-gold">
+                        B&amp;H ${displayBh.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                      </span>
+                    )}
+                    <span className="text-tertiary">
+                      DD -{displayDd.toFixed(2)}% (Max -{strategyResult.maxDrawdownPercent.toFixed(1)}%)
+                    </span>
+
+                    {/* Layer Toggle Pills */}
+                    <div className="flex items-center gap-1 pl-1.5 border-l border-border">
+                      <button
+                        onClick={() => setShowStrategyPane((p) => !p)}
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-bold border cursor-pointer transition-colors ${
+                          showStrategyPane
+                            ? "bg-primary-container/25 text-primary border-primary/40"
+                            : "bg-surface text-muted border-border"
+                        }`}
+                        title="Toggle Strategy Equity Sub-Pane"
+                      >
+                        Pane
+                      </button>
+                      <button
+                        onClick={() => setShowBuyHoldBenchmark((p) => !p)}
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-bold border cursor-pointer transition-colors ${
+                          showBuyHoldBenchmark
+                            ? "bg-gold/20 text-gold border-gold/40"
+                            : "bg-surface text-muted border-border"
+                        }`}
+                        title="Toggle Buy & Hold Benchmark Curve"
+                      >
+                        B&amp;H
+                      </button>
+                      <button
+                        onClick={() => setShowUnderwaterDrawdown((p) => !p)}
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-bold border cursor-pointer transition-colors ${
+                          showUnderwaterDrawdown
+                            ? "bg-tertiary/20 text-tertiary border-tertiary/40"
+                            : "bg-surface text-muted border-border"
+                        }`}
+                        title="Toggle Underwater Drawdown Histogram"
+                      >
+                        DD%
+                      </button>
+                      <button
+                        onClick={() => setShowTradeConnectors((p) => !p)}
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-bold border cursor-pointer transition-colors ${
+                          showTradeConnectors
+                            ? "bg-secondary/20 text-secondary border-secondary/40"
+                            : "bg-surface text-muted border-border"
+                        }`}
+                        title="Toggle On-Chart Trade Entry-to-Exit Connectors"
+                      >
+                        Lines ({trades.length})
+                      </button>
+                      {onClearStrategy && (
+                        <button
+                          onClick={onClearStrategy}
+                          className="text-muted hover:text-tertiary transition-colors p-0.5 rounded cursor-pointer"
+                          title="Clear Strategy Overlay"
+                        >
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Quick Parameter Tuning Modal (DEC-038 & DEC-071) */}

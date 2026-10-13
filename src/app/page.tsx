@@ -13,7 +13,9 @@ import { MobileBottomNav } from "@/components/mobile/MobileBottomNav";
 import { AuthModal } from "@/components/auth/AuthModal";
 import { replayEngine } from "@/lib/replay/replay-engine";
 import { CandlestickBar } from "@/lib/mexc/types";
-import { BacktestPerformance } from "@/lib/strategy/types";
+import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
+import { indicatorSandbox } from "@/lib/indicators/sandbox";
+import { STRATEGY_PRESETS } from "@/lib/strategy/presets";
 import { useAuth } from "@/lib/auth/use-auth";
 import { SavedLayoutItem } from "@/components/terminal/LayoutDropdown";
 
@@ -30,6 +32,8 @@ export default function WorkstationPage() {
   const [isIndicatorsModalOpen, setIsIndicatorsModalOpen] = useState(false);
   const [isReplayActive, setIsReplayActive] = useState(false);
   const [strategyResult, setStrategyResult] = useState<BacktestPerformance | null>(null);
+  const [activeStrategyName, setActiveStrategyName] = useState<string>(STRATEGY_PRESETS[0].name);
+  const [focusedTrade, setFocusedTrade] = useState<BacktestTrade | null>(null);
 
   // Active tools & indicators
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("crosshair");
@@ -69,6 +73,28 @@ export default function WorkstationPage() {
   const handleBarsLoaded = useCallback((bars: CandlestickBar[]) => {
     setCachedBars(bars);
   }, []);
+
+  // Auto-run default strategy backtest when "Strategy Equity Curve & Underwater Drawdown" is toggled on
+  useEffect(() => {
+    const hasStrategyOverlay = activeIndicators.includes(
+      "Strategy Equity Curve & Underwater Drawdown"
+    );
+    if (hasStrategyOverlay && cachedBars.length > 0 && !strategyResult) {
+      indicatorSandbox
+        .execute({
+          scriptId: "auto-strategy-overlay",
+          code: STRATEGY_PRESETS[0].code,
+          bars: cachedBars,
+          inputs: { period: 20, initialCapital: 10000, feeRate: 0.0005 },
+        })
+        .then((res) => {
+          if (res.success && res.strategyResult) {
+            setStrategyResult(res.strategyResult);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeIndicators, cachedBars, strategyResult]);
 
   // Mobile navigation state
   const [mobileScreen, setMobileScreen] = useState<"chart" | "watchlist" | "depth" | "draw" | "studio">("chart");
@@ -294,6 +320,16 @@ export default function WorkstationPage() {
               activeIndicators={activeIndicators}
               onToggleIndicator={handleApplyIndicator}
               trades={strategyResult?.trades || []}
+              strategyResult={strategyResult}
+              strategyName={activeStrategyName}
+              focusedTrade={focusedTrade}
+              onClearStrategy={() => {
+                setStrategyResult(null);
+                setFocusedTrade(null);
+                setActiveIndicators((prev) =>
+                  prev.filter((i) => i !== "Strategy Equity Curve & Underwater Drawdown")
+                );
+              }}
               onBarsLoaded={handleBarsLoaded}
               onPriceUpdate={handlePriceUpdate}
               favoriteTools={favoriteTools}
@@ -313,7 +349,11 @@ export default function WorkstationPage() {
             isOpen={isStudioOpen}
             onClose={() => setIsStudioOpen(false)}
             sampleBars={cachedBars}
-            onStrategyResult={setStrategyResult}
+            onStrategyResult={(res, name) => {
+              setStrategyResult(res);
+              if (name) setActiveStrategyName(name);
+            }}
+            onSelectTrade={(trade) => setFocusedTrade(trade)}
             onApplyIndicator={(name) => {
               handleApplyIndicator(name);
               setIsStudioOpen(false);

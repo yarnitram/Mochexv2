@@ -20,7 +20,7 @@ interface IndicatorCatalogItem {
   id: string;
   name: string;
   author: string;
-  category: "community" | "custom" | "builtins" | "volume";
+  category: "community" | "custom" | "builtins" | "volume" | "strategies";
   type: "Overlay" | "Sub-pane";
   rating: number;
   usersCount: string;
@@ -39,6 +39,17 @@ const CATALOG_ITEMS: IndicatorCatalogItem[] = [
     rating: 4.9,
     usersCount: "28.4K",
     description: "Multi-layered Exponential Moving Average ribbon (20, 50, 100, 200) highlighting trend dynamic compression and expansion zones.",
+    isVerified: true,
+  },
+  {
+    id: "strategy-equity-underwater",
+    name: "Strategy Equity Curve & Underwater Drawdown",
+    author: "Mochex Quant",
+    category: "strategies",
+    type: "Sub-pane",
+    rating: 5.0,
+    usersCount: "41.8K",
+    description: "Synchronized main-chart sub-pane rendering cumulative Strategy Equity vs. Buy & Hold Benchmark, Underwater Drawdown %, and Entry-to-Exit trade execution connectors.",
     isVerified: true,
   },
   {
@@ -121,6 +132,7 @@ export function IndicatorsModal({
 
   const categories = [
     { id: "all", label: "All Indicators", count: CATALOG_ITEMS.length, icon: <Layers size={14} /> },
+    { id: "strategies", label: "Quant Strategies", count: 1, icon: <Activity size={14} /> },
     { id: "community", label: "Global Community", count: 2, icon: <Sparkles size={14} /> },
     { id: "builtins", label: "Built-in Overlays", count: 2, icon: <TrendingUp size={14} /> },
     { id: "volume", label: "Volume Profiles", count: 1, icon: <BarChart2 size={14} /> },

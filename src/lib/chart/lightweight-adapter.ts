@@ -7,7 +7,7 @@ import {
   UTCTimestamp,
 } from "lightweight-charts";
 import { CandlestickBar } from "../mexc/types";
-import { BacktestTrade } from "../strategy/types";
+import { BacktestTrade, EquityPoint } from "../strategy/types";
 import { ta } from "../indicators/ta-math";
 
 /**
@@ -253,4 +253,101 @@ export function buildMacdData(
 
   return { macd, signal, histogram };
 }
+
+export interface StrategyEquitySeriesData {
+  equityLine: LineData<Time>[];
+  buyAndHoldLine: LineData<Time>[];
+  underwaterDrawdownHistogram: HistogramData<Time>[];
+  buyAndHoldReturnPercent: number;
+  alphaPercent: number;
+}
+
+/**
+ * Builds Strategy Equity Curve, Buy & Hold Benchmark, and Underwater Drawdown % Histogram
+ * series aligned with Lightweight Charts timestamps (DEC-074).
+ */
+export function buildStrategyEquitySeriesData(
+  equityCurve: EquityPoint[],
+  bars: CandlestickBar[],
+  initialCapital = 10000
+): StrategyEquitySeriesData {
+  if (!equityCurve || equityCurve.length === 0) {
+    return {
+      equityLine: [],
+      buyAndHoldLine: [],
+      underwaterDrawdownHistogram: [],
+      buyAndHoldReturnPercent: 0,
+      alphaPercent: 0,
+    };
+  }
+
+  const sortedEquity = [...equityCurve].sort((a, b) => a.time - b.time);
+  const sortedBars = [...bars].sort((a, b) => a.time - b.time);
+  const barByUtcTime = new Map<number, CandlestickBar>();
+  for (const bar of sortedBars) {
+    barByUtcTime.set(Number(toUtcTimestamp(bar.time)), bar);
+  }
+
+  const firstBar = sortedBars[0];
+  const basePrice = firstBar && firstBar.open > 0 ? firstBar.open : 1;
+
+  const equityLine: LineData<Time>[] = [];
+  const buyAndHoldLine: LineData<Time>[] = [];
+  const underwaterDrawdownHistogram: HistogramData<Time>[] = [];
+  const seenTimes = new Set<number>();
+
+  for (const pt of sortedEquity) {
+    const utcSec = Number(toUtcTimestamp(pt.time));
+    if (seenTimes.has(utcSec)) continue;
+    seenTimes.add(utcSec);
+
+    const time = utcSec as UTCTimestamp;
+    equityLine.push({
+      time,
+      value: pt.equity,
+    });
+
+    const ddVal = -Math.abs(pt.drawdownPercent || 0);
+    underwaterDrawdownHistogram.push({
+      time,
+      value: ddVal,
+      color:
+        Math.abs(pt.drawdownPercent) > 5
+          ? "rgba(255, 59, 48, 0.75)"
+          : "rgba(255, 59, 48, 0.42)",
+    });
+
+    const matchingBar = barByUtcTime.get(utcSec);
+    if (matchingBar && firstBar && firstBar.open > 0) {
+      const bhEquity = parseFloat(
+        (initialCapital * (matchingBar.close / basePrice)).toFixed(2)
+      );
+      buyAndHoldLine.push({
+        time,
+        value: bhEquity,
+      });
+    }
+  }
+
+  const lastEquity = sortedEquity[sortedEquity.length - 1]?.equity ?? initialCapital;
+  const strategyReturnPct =
+    initialCapital > 0 ? ((lastEquity - initialCapital) / initialCapital) * 100 : 0;
+
+  const lastBar = sortedBars[sortedBars.length - 1];
+  const buyAndHoldReturnPercent =
+    firstBar && lastBar && firstBar.open > 0
+      ? parseFloat((((lastBar.close - firstBar.open) / firstBar.open) * 100).toFixed(2))
+      : 0;
+
+  const alphaPercent = parseFloat((strategyReturnPct - buyAndHoldReturnPercent).toFixed(2));
+
+  return {
+    equityLine,
+    buyAndHoldLine,
+    underwaterDrawdownHistogram,
+    buyAndHoldReturnPercent,
+    alphaPercent,
+  };
+}
+
 

@@ -27,7 +27,7 @@ interface ScriptStudioProps {
   onClose: () => void;
   sampleBars: CandlestickBar[];
   onApplyIndicator?: (name: string, code: string) => void;
-  onStrategyResult?: (result: BacktestPerformance) => void;
+  onStrategyResult?: (result: BacktestPerformance, name?: string) => void;
   onSelectTrade?: (trade: BacktestTrade) => void;
 }
 
@@ -65,8 +65,14 @@ export function ScriptStudio({
     "[SANDBOX] Environment ready. Zero latency execution guard enabled (1500ms limit).",
   ]);
 
-  const runCompilation = async (currentCode = code, capital = initialCapital, fee = feeRate) => {
+  const runCompilation = async (
+    currentCode = code,
+    capital = initialCapital,
+    fee = feeRate,
+    overrideName?: string
+  ) => {
     setIsCompiling(true);
+    const activeName = overrideName || scriptName;
     const fallbackBars = sampleBars.length > 0 ? sampleBars : [
       { time: Date.now() - 3600000, open: 68000, high: 68500, low: 67900, close: 68420, volume: 100 },
       { time: Date.now() - 1800000, open: 68420, high: 68600, low: 68300, close: 68550, volume: 120 },
@@ -93,15 +99,15 @@ export function ScriptStudio({
 
         if (res.strategyResult) {
           setStrategyResult(res.strategyResult);
-          onStrategyResult?.(res.strategyResult);
+          onStrategyResult?.(res.strategyResult, activeName);
           setLogs((prev) => [
             `[STRATEGY] Backtest executed: ${res.strategyResult?.totalTrades} trades, Win Rate: ${res.strategyResult?.winRate}%, Net Profit: $${res.strategyResult?.netProfit}`,
-            `[SUCCESS] '${scriptName}' compiled in ${res.durationMs.toFixed(2)}ms.`,
+            `[SUCCESS] '${activeName}' compiled in ${res.durationMs.toFixed(2)}ms.`,
             ...prev.slice(0, 15),
           ]);
         } else {
           setLogs((prev) => [
-            `[SUCCESS] '${scriptName}' compiled in ${res.durationMs.toFixed(2)}ms. Output points: ${res.data?.length || 0}`,
+            `[SUCCESS] '${activeName}' compiled in ${res.durationMs.toFixed(2)}ms. Output points: ${res.data?.length || 0}`,
             ...prev.slice(0, 15),
           ]);
         }
@@ -139,7 +145,7 @@ export function ScriptStudio({
     setCode(preset.code);
     setScriptName(preset.name);
     setIsPresetDropdownOpen(false);
-    runCompilation(preset.code);
+    runCompilation(preset.code, initialCapital, feeRate, preset.name);
   };
 
   return (
