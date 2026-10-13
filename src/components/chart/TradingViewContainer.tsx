@@ -78,6 +78,8 @@ import {
 } from "@/lib/chart/lightweight-adapter";
 
 interface TradingViewContainerProps {
+  paneId?: string;
+  syncCrosshair?: boolean;
   symbol: string;
   resolution: string;
   activeDrawingTool?: DrawingToolType;
@@ -133,6 +135,8 @@ interface HoveredStats {
 }
 
 export function TradingViewContainer({
+  paneId = "pane-0",
+  syncCrosshair = true,
   symbol,
   resolution,
   activeDrawingTool = "none",
@@ -193,6 +197,13 @@ export function TradingViewContainer({
   const [showBuyHoldBenchmark, setShowBuyHoldBenchmark] = useState(true);
   const [showUnderwaterDrawdown, setShowUnderwaterDrawdown] = useState(true);
   const [showTradeConnectors, setShowTradeConnectors] = useState(true);
+
+  // Multi-Chart Crosshair Synchronization state (DEC-075)
+  const [syncedCrosshairTime, setSyncedCrosshairTime] = useState<number | null>(null);
+  const syncCrosshairRef = useRef(syncCrosshair);
+  syncCrosshairRef.current = syncCrosshair;
+  const paneIdRef = useRef(paneId);
+  paneIdRef.current = paneId;
 
   // Quick settings tuning modal state
   const [activeSettingsModal, setActiveSettingsModal] = useState<"rsi" | "macd" | "vpvr" | null>(null);
@@ -407,11 +418,28 @@ export function TradingViewContainer({
     const markersPlugin = createSeriesMarkers(candleSeries, []);
     markersPluginRef.current = markersPlugin;
 
-    // 2.5 Crosshair Hover Telemetry Synchronization (DEC-034 & DEC-074)
+    // 2.5 Crosshair Hover Telemetry Synchronization (DEC-034, DEC-074 & DEC-075)
     chart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point) {
         setHoveredStats(null);
+        if (syncCrosshairRef.current && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("mochex:crosshair-sync", {
+              detail: { sourcePaneId: paneIdRef.current, timeMs: null },
+            })
+          );
+        }
         return;
+      }
+
+      if (syncCrosshairRef.current && typeof window !== "undefined") {
+        const timeSec = Number(param.time);
+        const timeMs = timeSec > 1e11 ? timeSec : timeSec * 1000;
+        window.dispatchEvent(
+          new CustomEvent("mochex:crosshair-sync", {
+            detail: { sourcePaneId: paneIdRef.current, timeMs },
+          })
+        );
       }
 
       const candleData = param.seriesData.get(candleSeries) as BarData<Time> | undefined;
@@ -3572,6 +3600,46 @@ export function TradingViewContainer({
       }
     }
 
+    // 6. Multi-Chart Synchronized Crosshair Guide (DEC-075)
+    if (syncCrosshair && syncedCrosshairTime !== null) {
+      const syncX = timeToCoordinate(syncedCrosshairTime);
+      if (syncX !== null && syncX >= 0 && syncX <= rect.width) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(41, 98, 255, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(syncX, 0);
+        ctx.lineTo(syncX, rect.height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Find nearest bar close price at syncedCrosshairTime to draw synchronized price dot
+        let nearestBar: CandlestickBar | null = null;
+        let minDiff = Infinity;
+        for (const b of barsRef.current) {
+          const diff = Math.abs(b.time - syncedCrosshairTime);
+          if (diff < minDiff) {
+            minDiff = diff;
+            nearestBar = b;
+          }
+        }
+        if (nearestBar) {
+          const syncY = priceToCoordinate(nearestBar.close);
+          if (syncY !== null && syncY >= 0 && syncY <= rect.height) {
+            ctx.fillStyle = "#2962ff";
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(syncX, syncY, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
     ctx.restore();
   }, [
     drawings,
@@ -3585,6 +3653,8 @@ export function TradingViewContainer({
     trades,
     focusedTrade,
     showTradeConnectors,
+    syncCrosshair,
+    syncedCrosshairTime,
     symbol,
     selectedDrawingId,
     inFlightDrawing,
@@ -3618,6 +3688,21 @@ export function TradingViewContainer({
     renderText,
     renderHandles,
   ]);
+
+  // Listen for Multi-Chart Crosshair Synchronization events from sibling panes (DEC-075)
+  useEffect(() => {
+    const onCrosshairSync = (e: Event) => {
+      const detail = (e as CustomEvent<{ sourcePaneId: string; timeMs: number | null }>).detail;
+      if (!detail || detail.sourcePaneId === paneId) return;
+      if (!syncCrosshair) {
+        setSyncedCrosshairTime(null);
+        return;
+      }
+      setSyncedCrosshairTime(detail.timeMs);
+    };
+    window.addEventListener("mochex:crosshair-sync", onCrosshairSync);
+    return () => window.removeEventListener("mochex:crosshair-sync", onCrosshairSync);
+  }, [paneId, syncCrosshair]);
 
   // Subscribe to Pan & Zoom events to re-project drawings seamlessly
   useEffect(() => {

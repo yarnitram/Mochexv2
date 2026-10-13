@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { TacticalHeader } from "@/components/terminal/TacticalHeader";
 import { DrawingRail, DrawingToolType } from "@/components/terminal/DrawingRail";
 import { RightSidebar } from "@/components/terminal/RightSidebar";
@@ -18,11 +19,36 @@ import { indicatorSandbox } from "@/lib/indicators/sandbox";
 import { STRATEGY_PRESETS } from "@/lib/strategy/presets";
 import { useAuth } from "@/lib/auth/use-auth";
 import { SavedLayoutItem } from "@/components/terminal/LayoutDropdown";
+import {
+  createInitialMultiChartState,
+  getVisiblePanes,
+  getActivePane,
+  setGridLayoutMode,
+  updateActivePaneSymbol,
+  updateActivePaneResolution,
+  toggleGridSyncOption,
+  toggleMaximizePane,
+  GridLayoutMode,
+  GridSyncConfig,
+  MultiChartWorkspaceState,
+} from "@/lib/chart/multi-chart-grid";
+
+function formatResolutionBadge(res: string): string {
+  if (res === "1D" || res === "1W") return res;
+  const mins = Number(res);
+  if (mins >= 60) return `${mins / 60}H`;
+  return `${res}m`;
+}
 
 export default function WorkstationPage() {
   // Authentication session
   const { user, login, register, logout } = useAuth();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Multi-Chart Split-Screen Workspace State
+  const [gridState, setGridState] = useState<MultiChartWorkspaceState>(() =>
+    createInitialMultiChartState("BTCUSDT", "15")
+  );
 
   // Workspace state with localStorage persistence
   const [symbol, setSymbol] = useState("BTCUSDT");
@@ -111,9 +137,24 @@ export default function WorkstationPage() {
       const savedIndicators = localStorage.getItem("mochex:active_indicators");
       const savedFavs = localStorage.getItem("mochex:favorite_drawing_tools");
       const savedShowFavs = localStorage.getItem("mochex:show_favorites_bar");
+      const savedGrid = localStorage.getItem("mochex:multi_chart_grid");
 
-      if (savedSymbol) setSymbol(savedSymbol);
-      if (savedRes) setResolution(savedRes);
+      if (savedGrid) {
+        const parsedGrid = JSON.parse(savedGrid) as MultiChartWorkspaceState;
+        if (parsedGrid && Array.isArray(parsedGrid.panes) && parsedGrid.panes.length === 4) {
+          setGridState(parsedGrid);
+          const activePane = getActivePane(parsedGrid);
+          setSymbol(activePane.symbol);
+          setResolution(activePane.resolution);
+        }
+      } else {
+        const initSym = savedSymbol || "BTCUSDT";
+        const initRes = savedRes || "15";
+        setSymbol(initSym);
+        setResolution(initRes);
+        setGridState(createInitialMultiChartState(initSym, initRes));
+      }
+
       if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
       if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
       if (savedIndicators) setActiveIndicators(JSON.parse(savedIndicators));
@@ -122,6 +163,29 @@ export default function WorkstationPage() {
     } catch {
       // Ignore localStorage errors
     }
+  }, []);
+
+  // Persist gridState changes to localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem("mochex:multi_chart_grid", JSON.stringify(gridState));
+    } catch {}
+  }, [gridState]);
+
+  // Alt+Enter shortcut to Maximize / Restore active split pane
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === "Enter") {
+        e.preventDefault();
+        setGridState((prev) => {
+          if (prev.layoutMode === "1x1") return prev;
+          return toggleMaximizePane(prev, prev.activePaneId);
+        });
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   useEffect(() => {
@@ -141,9 +205,10 @@ export default function WorkstationPage() {
     };
   }, []);
 
-  // Save changes to localStorage
+  // Save changes to localStorage and update active pane (or all panes if sync enabled)
   const handleSelectSymbol = (sym: string) => {
     setSymbol(sym);
+    setGridState((prev) => updateActivePaneSymbol(prev, sym));
     try {
       localStorage.setItem("mochex:symbol", sym);
     } catch {}
@@ -151,9 +216,43 @@ export default function WorkstationPage() {
 
   const handleSelectResolution = (res: string) => {
     setResolution(res);
+    setGridState((prev) => updateActivePaneResolution(prev, res));
     try {
       localStorage.setItem("mochex:resolution", res);
     } catch {}
+  };
+
+  const handleSelectGridLayout = (mode: GridLayoutMode) => {
+    setGridState((prev) => {
+      const next = setGridLayoutMode(prev, mode);
+      const active = getActivePane(next);
+      setSymbol(active.symbol);
+      setResolution(active.resolution);
+      return next;
+    });
+  };
+
+  const handleToggleGridSync = (key: keyof GridSyncConfig) => {
+    setGridState((prev) => toggleGridSyncOption(prev, key));
+  };
+
+  const handleFocusPane = (paneId: string) => {
+    setGridState((prev) => {
+      if (prev.activePaneId === paneId) return prev;
+      const target = prev.panes.find((p) => p.id === paneId);
+      if (target) {
+        setSymbol(target.symbol);
+        setResolution(target.resolution);
+      }
+      return {
+        ...prev,
+        activePaneId: paneId,
+      };
+    });
+  };
+
+  const handleToggleMaximizePane = (paneId: string) => {
+    setGridState((prev) => toggleMaximizePane(prev, paneId));
   };
 
   const handleToggleSidebar = () => {
@@ -256,6 +355,17 @@ export default function WorkstationPage() {
     }
   };
 
+  const visiblePanes = getVisiblePanes(gridState);
+  const isSplitGrid = gridState.layoutMode !== "1x1";
+  const effectiveGridClass =
+    gridState.maximizedPaneId || gridState.layoutMode === "1x1"
+      ? "grid-cols-1 grid-rows-1"
+      : gridState.layoutMode === "2x1"
+        ? "grid-cols-1 md:grid-cols-2 grid-rows-1"
+        : gridState.layoutMode === "1x2"
+          ? "grid-cols-1 grid-rows-2"
+          : "grid-cols-1 md:grid-cols-2 grid-rows-2";
+
   return (
     <main className="h-screen w-screen flex flex-col bg-background select-none overflow-hidden font-sans">
       {/* 1. Desktop Tactical Header */}
@@ -281,6 +391,10 @@ export default function WorkstationPage() {
         user={user}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onLoadLayout={handleLoadLayout}
+        gridLayoutMode={gridState.layoutMode}
+        onSelectGridLayout={handleSelectGridLayout}
+        gridSync={gridState.sync}
+        onToggleGridSync={handleToggleGridSync}
       />
 
       {/* 2. Main Terminal Workspace Body */}
@@ -306,37 +420,106 @@ export default function WorkstationPage() {
           />
         </div>
 
-        {/* Center Workspace (Chart Canvas + Replay Simulation Pill) */}
+        {/* Center Workspace (Multi-Chart Split-Screen Grid + Replay Simulation Pill) */}
         <div className="flex-1 flex flex-col relative overflow-hidden">
-          <div className="flex-1 relative w-full h-full">
-            <TradingViewContainer
-              symbol={symbol}
-              resolution={resolution}
-              activeDrawingTool={activeDrawingTool}
-              onSelectDrawingTool={setActiveDrawingTool}
-              isMagnetActive={isMagnetActive}
-              isDrawingsLocked={isDrawingsLocked}
-              isDrawingsHidden={isDrawingsHidden}
-              activeIndicators={activeIndicators}
-              onToggleIndicator={handleApplyIndicator}
-              trades={strategyResult?.trades || []}
-              strategyResult={strategyResult}
-              strategyName={activeStrategyName}
-              focusedTrade={focusedTrade}
-              onClearStrategy={() => {
-                setStrategyResult(null);
-                setFocusedTrade(null);
-                setActiveIndicators((prev) =>
-                  prev.filter((i) => i !== "Strategy Equity Curve & Underwater Drawdown")
-                );
-              }}
-              onBarsLoaded={handleBarsLoaded}
-              onPriceUpdate={handlePriceUpdate}
-              favoriteTools={favoriteTools}
-              onToggleFavorite={handleToggleFavoriteTool}
-              showFavoritesBar={showFavoritesBar}
-              onToggleFavoritesBar={handleToggleFavoritesBar}
-            />
+          <div className={`flex-1 relative w-full h-full grid gap-[2px] bg-border/60 ${effectiveGridClass}`}>
+            {visiblePanes.map((pane, idx) => {
+              const isPaneActive = pane.id === gridState.activePaneId;
+              const isPaneMaximized = gridState.maximizedPaneId === pane.id;
+              return (
+                <div
+                  key={pane.id}
+                  onMouseDown={() => handleFocusPane(pane.id)}
+                  className={`relative w-full h-full overflow-hidden bg-background transition-shadow ${
+                    isSplitGrid
+                      ? isPaneActive
+                        ? "ring-1 ring-inset ring-[#2962ff]"
+                        : "opacity-95 hover:opacity-100"
+                      : ""
+                  }`}
+                >
+                  {/* Per-Pane Header Badge & Maximize/Restore Control (Visible on Split Grids) */}
+                  {isSplitGrid && (
+                    <div
+                      className={`absolute top-2 right-16 z-30 flex items-center gap-1.5 px-2 py-0.5 rounded border backdrop-blur-md text-[10px] font-mono shadow-md transition-colors ${
+                        isPaneActive
+                          ? "bg-[#161a25]/95 border-[#2962ff]/70 text-white"
+                          : "bg-[#12161f]/85 border-outline-variant/40 text-muted hover:text-on-surface"
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          isPaneActive ? "bg-[#2962ff] shadow-[0_0_6px_#2962ff]" : "bg-muted/50"
+                        }`}
+                      />
+                      <span className="font-bold tracking-tight">
+                        {pane.symbol.replace(/USDT$/, "")}/USDT
+                      </span>
+                      <span className="text-primary font-semibold">
+                        {formatResolutionBadge(pane.resolution)}
+                      </span>
+                      {gridState.sync.syncCrosshair && (
+                        <span
+                          className="text-[8px] px-1 rounded bg-cyan/15 text-cyan uppercase"
+                          title="Crosshair Sync Active"
+                        >
+                          SYNC
+                        </span>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleMaximizePane(pane.id);
+                        }}
+                        title={
+                          isPaneMaximized
+                            ? "Restore Split Grid (Alt+Enter)"
+                            : `Maximize Pane #${idx + 1} (Alt+Enter)`
+                        }
+                        className="ml-0.5 p-0.5 rounded hover:bg-surface-container-high text-muted hover:text-white transition-colors cursor-pointer"
+                      >
+                        {isPaneMaximized ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
+                      </button>
+                    </div>
+                  )}
+
+                  <TradingViewContainer
+                    paneId={pane.id}
+                    symbol={pane.symbol}
+                    resolution={pane.resolution}
+                    syncCrosshair={
+                      gridState.sync.syncCrosshair &&
+                      isSplitGrid &&
+                      !gridState.maximizedPaneId
+                    }
+                    activeDrawingTool={isPaneActive ? activeDrawingTool : "crosshair"}
+                    onSelectDrawingTool={setActiveDrawingTool}
+                    isMagnetActive={isMagnetActive}
+                    isDrawingsLocked={isDrawingsLocked}
+                    isDrawingsHidden={isDrawingsHidden}
+                    activeIndicators={activeIndicators}
+                    onToggleIndicator={handleApplyIndicator}
+                    trades={isPaneActive ? strategyResult?.trades || [] : []}
+                    strategyResult={isPaneActive ? strategyResult : null}
+                    strategyName={activeStrategyName}
+                    focusedTrade={isPaneActive ? focusedTrade : null}
+                    onClearStrategy={() => {
+                      setStrategyResult(null);
+                      setFocusedTrade(null);
+                      setActiveIndicators((prev) =>
+                        prev.filter((i) => i !== "Strategy Equity Curve & Underwater Drawdown")
+                      );
+                    }}
+                    onBarsLoaded={isPaneActive ? handleBarsLoaded : undefined}
+                    onPriceUpdate={isPaneActive ? handlePriceUpdate : undefined}
+                    favoriteTools={favoriteTools}
+                    onToggleFavorite={handleToggleFavoriteTool}
+                    showFavoritesBar={showFavoritesBar && isPaneActive}
+                    onToggleFavoritesBar={handleToggleFavoritesBar}
+                  />
+                </div>
+              );
+            })}
 
             {/* In-chart Floating Simulation Control Pill */}
             {isReplayActive && (

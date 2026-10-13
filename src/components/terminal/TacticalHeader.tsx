@@ -15,9 +15,14 @@ import {
   User,
   Shield,
   Sparkles,
+  LayoutGrid,
+  Columns2,
+  Rows2,
+  Square,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
+import { GridLayoutMode, GridSyncConfig } from "@/lib/chart/multi-chart-grid";
 
 interface TacticalHeaderProps {
   symbol: string;
@@ -41,6 +46,10 @@ interface TacticalHeaderProps {
   user?: AuthUser | null;
   onOpenAuthModal?: () => void;
   onLoadLayout?: (layout: SavedLayoutItem) => void;
+  gridLayoutMode?: GridLayoutMode;
+  onSelectGridLayout?: (mode: GridLayoutMode) => void;
+  gridSync?: GridSyncConfig;
+  onToggleGridSync?: (key: keyof GridSyncConfig) => void;
 }
 
 const TIMEFRAMES = [
@@ -77,8 +86,13 @@ export function TacticalHeader({
   user = null,
   onOpenAuthModal,
   onLoadLayout = () => {},
+  gridLayoutMode = "1x1",
+  onSelectGridLayout,
+  gridSync = { syncSymbol: false, syncInterval: false, syncCrosshair: true },
+  onToggleGridSync,
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
+  const [isGridDropdownOpen, setIsGridDropdownOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -290,6 +304,150 @@ export function TacticalHeader({
         >
           <Code2 size={15} />
         </button>
+
+        {/* Multi-Chart Split-Grid Layout Switcher & Sync Popover */}
+        {onSelectGridLayout && (
+          <div className="relative">
+            <button
+              onClick={() => setIsGridDropdownOpen((prev) => !prev)}
+              title={`Chart Grid Layout (${gridLayoutMode})`}
+              className={`flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-mono transition-colors cursor-pointer ${
+                gridLayoutMode !== "1x1" || isGridDropdownOpen
+                  ? "bg-primary-container/20 text-primary border-primary/40"
+                  : "bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border-outline-variant/30"
+              }`}
+            >
+              <LayoutGrid size={14} />
+              <span className="hidden md:inline font-bold">{gridLayoutMode}</span>
+            </button>
+
+            {isGridDropdownOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setIsGridDropdownOpen(false)}
+                />
+                <div className="absolute right-0 top-full mt-1.5 w-60 rounded-lg bg-[#161a25] border border-outline-variant/40 shadow-2xl z-50 p-2.5 flex flex-col gap-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-muted font-semibold">
+                      Split-Screen Grid Layout
+                    </span>
+                    <span className="text-[9px] font-mono text-primary bg-primary/10 px-1.5 py-0.5 rounded">
+                      {gridLayoutMode}
+                    </span>
+                  </div>
+
+                  {/* 4 Layout Preset Buttons */}
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(
+                      [
+                        { mode: "1x1", label: "1x1", desc: "Single Chart" },
+                        { mode: "2x1", label: "2x1", desc: "Vertical Split" },
+                        { mode: "1x2", label: "1x2", desc: "Horizontal Split" },
+                        { mode: "2x2", label: "2x2", desc: "Quad Grid" },
+                      ] as const
+                    ).map((preset) => {
+                      const active = gridLayoutMode === preset.mode;
+                      return (
+                        <button
+                          key={preset.mode}
+                          onClick={() => {
+                            onSelectGridLayout(preset.mode);
+                          }}
+                          title={preset.desc}
+                          className={`flex flex-col items-center justify-center gap-1 py-2 rounded border text-[10px] font-mono transition-colors cursor-pointer ${
+                            active
+                              ? "bg-primary/20 border-primary text-on-surface font-bold"
+                              : "bg-surface-container-low hover:bg-surface-container border-outline-variant/30 text-muted hover:text-on-surface"
+                          }`}
+                        >
+                          {/* Mini visual schematic */}
+                          <div className="w-5 h-3.5 border border-current rounded-[2px] p-[1px] grid gap-[1px] overflow-hidden"
+                            style={{
+                              gridTemplateColumns:
+                                preset.mode === "2x1" || preset.mode === "2x2" ? "1fr 1fr" : "1fr",
+                              gridTemplateRows:
+                                preset.mode === "1x2" || preset.mode === "2x2" ? "1fr 1fr" : "1fr",
+                            }}
+                          >
+                            <div className="bg-current/50 rounded-[1px]" />
+                            {(preset.mode === "2x1" || preset.mode === "1x2" || preset.mode === "2x2") && (
+                              <div className="bg-current/50 rounded-[1px]" />
+                            )}
+                            {preset.mode === "2x2" && (
+                              <>
+                                <div className="bg-current/50 rounded-[1px]" />
+                                <div className="bg-current/50 rounded-[1px]" />
+                              </>
+                            )}
+                          </div>
+                          <span>{preset.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Synchronization Toggles */}
+                  {gridSync && onToggleGridSync && (
+                    <div className="border-t border-outline-variant/25 pt-2 flex flex-col gap-1.5">
+                      <span className="text-[9px] font-mono uppercase tracking-wider text-muted font-semibold">
+                        Sync Across Panes
+                      </span>
+                      {(
+                        [
+                          {
+                            key: "syncSymbol",
+                            label: "Sync Symbol",
+                            hint: "Broadcast pair changes to all panes",
+                          },
+                          {
+                            key: "syncInterval",
+                            label: "Sync Interval",
+                            hint: "Broadcast timeframe changes to all panes",
+                          },
+                          {
+                            key: "syncCrosshair",
+                            label: "Sync Crosshair",
+                            hint: "Mirror time cursor across split panes",
+                          },
+                        ] as const
+                      ).map((item) => {
+                        const enabled = gridSync[item.key];
+                        return (
+                          <button
+                            key={item.key}
+                            onClick={() => onToggleGridSync(item.key)}
+                            className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-surface-container text-left transition-colors cursor-pointer"
+                            title={item.hint}
+                          >
+                            <div className="flex flex-col">
+                              <span className="text-[11px] font-medium text-on-surface">
+                                {item.label}
+                              </span>
+                              <span className="text-[9px] text-muted">{item.hint}</span>
+                            </div>
+                            <span
+                              className={`w-7 h-4 rounded-full p-0.5 transition-colors flex items-center ${
+                                enabled ? "bg-primary justify-end" : "bg-surface-container-highest justify-start"
+                              }`}
+                            >
+                              <span className="w-3 h-3 rounded-full bg-white shadow-xs" />
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="border-t border-outline-variant/20 pt-1.5 flex items-center justify-between text-[9px] font-mono text-muted">
+                    <span>Click any pane to focus</span>
+                    <span>Alt+Enter Maximize</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Multi-Layout Manager Dropdown */}
         <div className="hidden sm:block">
