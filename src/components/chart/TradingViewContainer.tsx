@@ -5853,10 +5853,10 @@ export function TradingViewContainer({
               onClose={() => setIsSettingsModalOpen(false)}
               drawing={selectedDrawing || null}
               onUpdateDrawing={(updated) => {
-                saveDrawings(drawings.map((d) => (d.id === updated.id ? updated : d)));
+                saveDrawings(drawingsRef.current.map((d) => (d.id === updated.id ? updated : d)));
               }}
               onDeleteDrawing={(id) => {
-                saveDrawings(drawings.filter((d) => d.id !== id));
+                saveDrawings(drawingsRef.current.filter((d) => d.id !== id));
                 setSelectedDrawingId(null);
                 setIsSettingsModalOpen(false);
               }}

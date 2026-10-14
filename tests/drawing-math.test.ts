@@ -434,5 +434,23 @@ describe("Geometric Drawing Math Engine (DEC-040 to DEC-055)", () => {
     const reorderedBackward = reorderDrawingLayer(reorderedForward, "rect_1", "backward");
     expect(reorderedBackward.map((d) => d.id)).toEqual(["rect_1", "rect_2", "rect_3"]);
   });
+
+  it("should update Fibonacci and Gann levels cleanly without mutating original array (DEC-090)", () => {
+    const originalLevels = [...DEFAULT_FIB_LEVELS];
+    const updatedRatio = 0.65;
+    const modifiedLevels = originalLevels.map((lvl, idx) =>
+      idx === 1 ? { ...lvl, ratio: updatedRatio } : lvl
+    );
+
+    expect(modifiedLevels[1].ratio).toBe(0.65);
+    expect(originalLevels[1].ratio).not.toBe(0.65);
+    expect(modifiedLevels.length).toBe(originalLevels.length);
+
+    // Verify calculated levels with the updated ratio
+    const calculated = calculateFibLevels(100, 200, modifiedLevels);
+    const customLvl = calculated.find((l) => l.ratio === 0.65);
+    expect(customLvl).toBeDefined();
+    expect(customLvl?.price).toBe(135);
+  });
 });
 

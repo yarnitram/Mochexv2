@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   X,
   Settings2,
@@ -121,73 +121,83 @@ export function DrawingSettingsModal({
     }
   }, [drawing?.type]);
 
-  // Populate state whenever opened drawing changes
+  const loadedDrawingIdRef = useRef<string | null>(null);
+
+  // Populate state whenever modal opens or a different drawing is selected
   useEffect(() => {
-    if (drawing) {
-      setColor(drawing.color || "#2962ff");
-      setLineWidth(drawing.lineWidth || 2);
-      setLineStyle(drawing.lineStyle || "solid");
-      setFillColor(drawing.fillColor || drawing.color || "#2962ff");
-      setFillOpacity(drawing.fillOpacity !== undefined ? Math.round(drawing.fillOpacity * 100) : 15);
-      setExtendRight(!!drawing.extendRight);
-      setExtendLeft(!!drawing.extendLeft);
-      setShowMetrics(drawing.showMetrics !== false);
-      setStartPrice(drawing.startPrice);
-      setEndPrice(drawing.endPrice);
-      setText(drawing.text || "");
-      setFontSize(drawing.fontSize || 11);
-
-      setShowMidLine(!!drawing.showMidLine);
-      setMidLineColor(drawing.midLineColor || drawing.color || "#2962ff");
-      setMidLineStyle(drawing.midLineStyle || "dashed");
-      setTextAlign(drawing.textAlign || "left");
-      setTextVAlign(drawing.textVAlign || "top");
-      setGannPriceLevels(
-        drawing.gannPriceLevels && drawing.gannPriceLevels.length > 0
-          ? drawing.gannPriceLevels
-          : DEFAULT_GANN_PRICE_LEVELS
-      );
-      setGannTimeLevels(
-        drawing.gannTimeLevels && drawing.gannTimeLevels.length > 0
-          ? drawing.gannTimeLevels
-          : DEFAULT_GANN_TIME_LEVELS
-      );
-      setShowGannAngles(drawing.showGannAngles !== false);
-      setGannAnglesColor(drawing.gannAnglesColor || "rgba(245, 172, 55, 0.6)");
-      setShowBackground(drawing.showBackground !== false);
-
-      // Fibonacci levels
-      if (drawing.type === "fibonacci" || drawing.type === "trend_fib") {
-        setFibLevels(
-          drawing.fibLevels && drawing.fibLevels.length > 0
-            ? drawing.fibLevels
-            : DEFAULT_FIB_LEVELS
-        );
-      }
-
-      // Position tool levels (DEC-066)
-      if (drawing.type === "long_position" || drawing.type === "short_position") {
-        setProfitColor(drawing.profitColor || "#089981");
-        setProfitOpacity(drawing.profitOpacity !== undefined ? drawing.profitOpacity : 20);
-        setStopColor(drawing.stopColor || "#f23636");
-        setStopOpacity(drawing.stopOpacity !== undefined ? drawing.stopOpacity : 20);
-        setAccountSize(drawing.accountSize || 10000);
-        setRiskPercent(drawing.riskPercent || 1.0);
-        setShowLabels(drawing.showLabels !== false);
-
-        const metrics = calculatePositionMetrics(
-          drawing.startPrice,
-          drawing.targetPrice || drawing.endPrice,
-          drawing.stopPrice,
-          drawing.type === "long_position",
-          drawing.accountSize || 10000,
-          drawing.riskPercent || 1.0
-        );
-        setTargetPrice(metrics.targetPrice);
-        setStopPrice(metrics.stopPrice);
-      }
+    if (!isOpen || !drawing) {
+      loadedDrawingIdRef.current = null;
+      return;
     }
-  }, [drawing]);
+    // Prevent re-populating and triggering recursive re-renders while editing the current drawing
+    if (loadedDrawingIdRef.current === drawing.id) {
+      return;
+    }
+    loadedDrawingIdRef.current = drawing.id;
+
+    setColor(drawing.color || "#2962ff");
+    setLineWidth(drawing.lineWidth || 2);
+    setLineStyle(drawing.lineStyle || "solid");
+    setFillColor(drawing.fillColor || drawing.color || "#2962ff");
+    setFillOpacity(drawing.fillOpacity !== undefined ? Math.round(drawing.fillOpacity * 100) : 15);
+    setExtendRight(!!drawing.extendRight);
+    setExtendLeft(!!drawing.extendLeft);
+    setShowMetrics(drawing.showMetrics !== false);
+    setStartPrice(drawing.startPrice);
+    setEndPrice(drawing.endPrice);
+    setText(drawing.text || "");
+    setFontSize(drawing.fontSize || 11);
+
+    setShowMidLine(!!drawing.showMidLine);
+    setMidLineColor(drawing.midLineColor || drawing.color || "#2962ff");
+    setMidLineStyle(drawing.midLineStyle || "dashed");
+    setTextAlign(drawing.textAlign || "left");
+    setTextVAlign(drawing.textVAlign || "top");
+    setGannPriceLevels(
+      drawing.gannPriceLevels && drawing.gannPriceLevels.length > 0
+        ? drawing.gannPriceLevels
+        : DEFAULT_GANN_PRICE_LEVELS
+    );
+    setGannTimeLevels(
+      drawing.gannTimeLevels && drawing.gannTimeLevels.length > 0
+        ? drawing.gannTimeLevels
+        : DEFAULT_GANN_TIME_LEVELS
+    );
+    setShowGannAngles(drawing.showGannAngles !== false);
+    setGannAnglesColor(drawing.gannAnglesColor || "rgba(245, 172, 55, 0.6)");
+    setShowBackground(drawing.showBackground !== false);
+
+    // Fibonacci levels
+    if (drawing.type === "fibonacci" || drawing.type === "trend_fib") {
+      setFibLevels(
+        drawing.fibLevels && drawing.fibLevels.length > 0
+          ? drawing.fibLevels
+          : DEFAULT_FIB_LEVELS
+      );
+    }
+
+    // Position tool levels (DEC-066)
+    if (drawing.type === "long_position" || drawing.type === "short_position") {
+      setProfitColor(drawing.profitColor || "#089981");
+      setProfitOpacity(drawing.profitOpacity !== undefined ? drawing.profitOpacity : 20);
+      setStopColor(drawing.stopColor || "#f23636");
+      setStopOpacity(drawing.stopOpacity !== undefined ? drawing.stopOpacity : 20);
+      setAccountSize(drawing.accountSize || 10000);
+      setRiskPercent(drawing.riskPercent || 1.0);
+      setShowLabels(drawing.showLabels !== false);
+
+      const metrics = calculatePositionMetrics(
+        drawing.startPrice,
+        drawing.targetPrice || drawing.endPrice,
+        drawing.stopPrice,
+        drawing.type === "long_position",
+        drawing.accountSize || 10000,
+        drawing.riskPercent || 1.0
+      );
+      setTargetPrice(metrics.targetPrice);
+      setStopPrice(metrics.stopPrice);
+    }
+  }, [isOpen, drawing?.id]);
 
   if (!isOpen || !drawing) return null;
 
@@ -233,6 +243,38 @@ export function DrawingSettingsModal({
   const handleLiveChange = (updates: Partial<ChartDrawing>) => {
     onUpdateDrawing({
       ...drawing,
+      color,
+      lineWidth,
+      lineStyle,
+      fillColor,
+      fillOpacity: fillOpacity / 100,
+      extendRight,
+      extendLeft,
+      showMetrics,
+      startPrice,
+      endPrice,
+      targetPrice: (drawing.type === "long_position" || drawing.type === "short_position") ? targetPrice : undefined,
+      stopPrice: (drawing.type === "long_position" || drawing.type === "short_position") ? stopPrice : undefined,
+      profitColor: (drawing.type === "long_position" || drawing.type === "short_position") ? profitColor : undefined,
+      profitOpacity: (drawing.type === "long_position" || drawing.type === "short_position") ? profitOpacity : undefined,
+      stopColor: (drawing.type === "long_position" || drawing.type === "short_position") ? stopColor : undefined,
+      stopOpacity: (drawing.type === "long_position" || drawing.type === "short_position") ? stopOpacity : undefined,
+      accountSize: (drawing.type === "long_position" || drawing.type === "short_position") ? accountSize : undefined,
+      riskPercent: (drawing.type === "long_position" || drawing.type === "short_position") ? riskPercent : undefined,
+      showLabels: (drawing.type === "long_position" || drawing.type === "short_position") ? showLabels : undefined,
+      fibLevels: (drawing.type === "fibonacci" || drawing.type === "trend_fib") ? fibLevels : undefined,
+      text,
+      fontSize,
+      showMidLine: drawing.type === "rectangle" ? showMidLine : undefined,
+      midLineColor: drawing.type === "rectangle" ? midLineColor : undefined,
+      midLineStyle: drawing.type === "rectangle" ? midLineStyle : undefined,
+      textAlign,
+      textVAlign,
+      gannPriceLevels: drawing.type === "gann_box" ? gannPriceLevels : undefined,
+      gannTimeLevels: drawing.type === "gann_box" ? gannTimeLevels : undefined,
+      showGannAngles: drawing.type === "gann_box" ? showGannAngles : undefined,
+      gannAnglesColor: drawing.type === "gann_box" ? gannAnglesColor : undefined,
+      showBackground,
       ...updates,
     });
   };
