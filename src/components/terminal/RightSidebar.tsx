@@ -209,12 +209,10 @@ export function RightSidebar({
   const [editingDrawingId, setEditingDrawingId] = useState<string | null>(null);
   const [editingNameValue, setEditingNameValue] = useState<string>("");
 
-  // Token Groups / Watchlist Profiles (DEC-091)
-  const [profiles, setProfiles] = useState<WatchlistProfile[]>(() =>
-    loadWatchlistProfiles()
-  );
-  const [activeProfileId, setActiveProfileId] = useState<string>(() =>
-    loadActiveProfileId(DEFAULT_WATCHLIST_PROFILES)
+  // Token Groups / Watchlist Profiles (DEC-091 & DEC-092)
+  const [profiles, setProfiles] = useState<WatchlistProfile[]>(DEFAULT_WATCHLIST_PROFILES);
+  const [activeProfileId, setActiveProfileId] = useState<string>(
+    DEFAULT_WATCHLIST_PROFILES[0].id
   );
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState("");
@@ -280,10 +278,14 @@ export function RightSidebar({
     }
   }, []);
 
-  // Load persisted alerts, logs, and paper account on client mount
+  // Load persisted alerts, logs, paper account, and watchlist profiles on client mount (DEC-092)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
+      const loadedProfiles = loadWatchlistProfiles();
+      setProfiles(loadedProfiles);
+      setActiveProfileId(loadActiveProfileId(loadedProfiles));
+
       const savedAlerts = localStorage.getItem("mochex:price_alerts");
       if (savedAlerts) {
         const parsed = JSON.parse(savedAlerts);
@@ -2147,7 +2149,7 @@ export function RightSidebar({
                 className="flex items-center gap-1.5 text-on-surface hover:text-primary font-semibold transition-colors cursor-pointer"
               >
                 <List size={12} className="text-muted" />
-                <span>{activeTab === "hot" ? "24h Volatility Leaders" : activeListName}</span>
+                <span suppressHydrationWarning>{activeTab === "hot" ? "24h Volatility Leaders" : activeListName}</span>
                 <ChevronDown size={11} className="text-muted" />
               </button>
 
@@ -2258,7 +2260,7 @@ export function RightSidebar({
               )}
             </div>
 
-            <span className="text-[10px] text-muted">{tickerList.length} pairs</span>
+            <span suppressHydrationWarning className="text-[10px] text-muted">{tickerList.length} pairs</span>
           </div>
 
           {/* Search Input + Add Pair Action */}
