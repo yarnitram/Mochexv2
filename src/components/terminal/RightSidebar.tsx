@@ -28,6 +28,7 @@ import {
   Check,
   TrendingUp,
   RotateCcw,
+  Zap,
 } from "lucide-react";
 import { mexcWsManager } from "@/lib/mexc/websocket";
 import { MexcMiniTickerItem } from "@/lib/mexc/types";
@@ -42,6 +43,7 @@ import {
   AlertFrequency,
   evaluateAlertsBatch,
   playInstitutionalAlertChime,
+  StrategyAlertEvaluationContext,
 } from "@/lib/alerts/alerts-engine";
 import {
   PaperAccountState,
@@ -219,12 +221,14 @@ export function RightSidebar({
     return map;
   });
 
-  // Live Price & Drawing Crossing Alerts State (DEC-069)
+  // Live Price, Drawing & Strategy Crossing Alerts State (DEC-069 & DEC-079)
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
   const [alertLogs, setAlertLogs] = useState<AlertLogEntry[]>([]);
+  const [alertFormMode, setAlertFormMode] = useState<"price" | "strategy">("price");
   const [newAlertPrice, setNewAlertPrice] = useState<string>("");
   const [newAlertCondition, setNewAlertCondition] = useState<AlertCondition>("crossing");
   const [newAlertFrequency, setNewAlertFrequency] = useState<AlertFrequency>("only_once");
+  const [newAlertScriptName, setNewAlertScriptName] = useState<string>("");
   const [newAlertLabel, setNewAlertLabel] = useState<string>("");
   const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
   const [activeToast, setActiveToast] = useState<AlertLogEntry | null>(null);
@@ -378,6 +382,90 @@ export function RightSidebar({
     return () =>
       window.removeEventListener("mochex:create-drawing-alert", handleCreateDrawingAlert);
   }, [saveAlerts]);
+
+  // Listen for Strategy & Indicator condition alerts creation & evaluation (DEC-079)
+  useEffect(() => {
+    const handleCreateStrategyAlert = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          symbol?: string;
+          scriptName?: string;
+          code?: string;
+          condition?: AlertCondition;
+          frequency?: AlertFrequency;
+        }>
+      ).detail;
+      if (!detail) return;
+
+      const targetSym = detail.symbol || selectedSymbol;
+      const nowMs = Date.now();
+      const condition: AlertCondition = detail.condition || "strategy_any_order";
+      const sName = detail.scriptName || "Active Script";
+      const created: PriceAlert = {
+        id: `alert-strat-${targetSym}-${nowMs}`,
+        symbol: targetSym,
+        targetPrice: currentPriceRef.current || 0,
+        condition,
+        frequency: detail.frequency || "once_per_bar_close",
+        sourceType: "strategy_order",
+        scriptName: sName,
+        label: `${sName}: ${condition.replace(/_/g, " ").toUpperCase()}`,
+        active: true,
+        triggeredCount: 0,
+        createdAt: nowMs,
+      };
+
+      saveAlerts([created, ...alertsRef.current]);
+      setActiveTab("alerts");
+      setAlertFormMode("strategy");
+      if (isSoundEnabledRef.current) {
+        playInstitutionalAlertChime();
+      }
+    };
+
+    const handleEvaluateStrategyAlerts = (e: Event) => {
+      const detail = (e as CustomEvent<StrategyAlertEvaluationContext>).detail;
+      if (!detail || !detail.symbol) return;
+
+      const sym = detail.symbol;
+      const prevPrice = detail.prevPrice ?? prevPricesRef.current[sym] ?? currentPriceRef.current;
+      const currPrice = detail.currentPrice ?? currentPriceRef.current;
+      const timeSec = detail.currentTimeSec ?? Math.floor(Date.now() / 1000);
+      const nowMs = detail.nowMs ?? Date.now();
+
+      const { updatedAlerts, triggeredLogs } = evaluateAlertsBatch(
+        alertsRef.current,
+        sym,
+        prevPrice,
+        currPrice,
+        timeSec,
+        nowMs,
+        detail
+      );
+
+      if (triggeredLogs.length > 0) {
+        saveAlerts(updatedAlerts);
+        setAlertLogs((prev) => {
+          const next = [...triggeredLogs, ...prev].slice(0, 50);
+          try {
+            localStorage.setItem("mochex:alert_logs", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+        setActiveToast(triggeredLogs[0]);
+        if (isSoundEnabledRef.current) {
+          playInstitutionalAlertChime();
+        }
+      }
+    };
+
+    window.addEventListener("mochex:create-strategy-alert", handleCreateStrategyAlert);
+    window.addEventListener("mochex:evaluate-strategy-alerts", handleEvaluateStrategyAlerts);
+    return () => {
+      window.removeEventListener("mochex:create-strategy-alert", handleCreateStrategyAlert);
+      window.removeEventListener("mochex:evaluate-strategy-alerts", handleEvaluateStrategyAlerts);
+    };
+  }, [selectedSymbol, saveAlerts]);
 
   // Listen for drawings synchronization and Object Tree open trigger (DEC-070)
   useEffect(() => {
@@ -649,28 +737,54 @@ export function RightSidebar({
 
   const handleCreateManualAlert = (e: React.FormEvent) => {
     e.preventDefault();
-    const target = parseFloat(newAlertPrice);
-    if (!Number.isFinite(target) || target <= 0) return;
-
     const nowMs = Date.now();
-    const formattedPrice = target >= 1 ? target.toFixed(2) : target.toFixed(4);
-    const created: PriceAlert = {
-      id: `alert-price-${selectedSymbol}-${nowMs}`,
-      symbol: selectedSymbol,
-      targetPrice: target,
-      condition: newAlertCondition,
-      frequency: newAlertFrequency,
-      sourceType: "price",
-      label:
-        newAlertLabel.trim() ||
-        `${selectedSymbol.replace("USDT", "/USDT")} ${newAlertCondition.replace("_", " ")} $${formattedPrice}`,
-      active: true,
-      triggeredCount: 0,
-      createdAt: nowMs,
-    };
 
-    saveAlerts([created, ...alertsRef.current]);
-    setNewAlertLabel("");
+    if (alertFormMode === "price") {
+      const target = parseFloat(newAlertPrice);
+      if (!Number.isFinite(target) || target <= 0) return;
+
+      const formattedPrice = target >= 1 ? target.toFixed(2) : target.toFixed(4);
+      const created: PriceAlert = {
+        id: `alert-price-${selectedSymbol}-${nowMs}`,
+        symbol: selectedSymbol,
+        targetPrice: target,
+        condition: newAlertCondition,
+        frequency: newAlertFrequency,
+        sourceType: "price",
+        label:
+          newAlertLabel.trim() ||
+          `${selectedSymbol.replace("USDT", "/USDT")} ${newAlertCondition.replace(/_/g, " ")} $${formattedPrice}`,
+        active: true,
+        triggeredCount: 0,
+        createdAt: nowMs,
+      };
+
+      saveAlerts([created, ...alertsRef.current]);
+      setNewAlertLabel("");
+    } else {
+      const isScriptCondition = newAlertCondition === "script_condition";
+      const isIndicator = newAlertCondition.startsWith("indicator_");
+      const sourceType = isScriptCondition || isIndicator ? "indicator_condition" : "strategy_order";
+      const scriptPrefix = newAlertScriptName.trim() ? `${newAlertScriptName.trim()}: ` : "";
+      const created: PriceAlert = {
+        id: `alert-strat-${selectedSymbol}-${nowMs}`,
+        symbol: selectedSymbol,
+        targetPrice: currentPriceRef.current || 0,
+        condition: newAlertCondition,
+        frequency: newAlertFrequency,
+        sourceType,
+        scriptName: newAlertScriptName.trim() || undefined,
+        label:
+          newAlertLabel.trim() ||
+          `${scriptPrefix}${newAlertCondition.replace(/_/g, " ").toUpperCase()} (${selectedSymbol.replace("USDT", "")})`,
+        active: true,
+        triggeredCount: 0,
+        createdAt: nowMs,
+      };
+
+      saveAlerts([created, ...alertsRef.current]);
+      setNewAlertLabel("");
+    }
   };
 
   const handleToggleAlertActive = (id: string) => {
@@ -763,7 +877,7 @@ export function RightSidebar({
         />
       </div>
 
-      {/* Floating Alert Triggered Toast Banner (DEC-069) */}
+      {/* Floating Alert Triggered Toast Banner (DEC-069 & DEC-079) */}
       {activeToast && (
         <div className="fixed top-14 right-6 z-50 w-80 bg-surface-container-high border-2 border-gold rounded-lg shadow-2xl p-3 font-mono text-xs animate-in fade-in slide-in-from-top-2">
           <div className="flex items-start justify-between gap-2">
@@ -779,15 +893,52 @@ export function RightSidebar({
             </button>
           </div>
           <div className="mt-1.5 text-on-surface font-semibold">{activeToast.label}</div>
+          {activeToast.message && (
+            <div className="text-[11px] text-muted mt-0.5 italic">{activeToast.message}</div>
+          )}
           <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
             <span>
-              Crossed @{" "}
+              Price @{" "}
               <strong className="text-secondary">
                 ${activeToast.triggerPrice >= 1 ? activeToast.triggerPrice.toFixed(2) : activeToast.triggerPrice.toFixed(4)}
               </strong>
             </span>
             <span>{new Date(activeToast.triggeredAt).toLocaleTimeString()}</span>
           </div>
+
+          {/* Interactive Paper Trade Action (DEC-079) */}
+          {activeToast.strategyOrderSide && (
+            <div className="mt-2.5 pt-2 border-t border-border flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent("mochex:open-paper-trade", {
+                      detail: { side: activeToast.strategyOrderSide === "long" ? "buy" : "sell" },
+                    })
+                  );
+                  setActiveToast(null);
+                }}
+                className={`flex-1 py-1 px-2 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-colors shadow-xs ${
+                  activeToast.strategyOrderSide === "long"
+                    ? "bg-secondary hover:bg-secondary-hover text-surface"
+                    : "bg-tertiary hover:bg-tertiary-hover text-white"
+                }`}
+              >
+                <Zap size={12} />
+                <span>Paper Trade: {activeToast.strategyOrderSide.toUpperCase()}</span>
+              </button>
+              <button
+                onClick={() => {
+                  onSelectSymbol(activeToast.symbol);
+                  setActiveTab("alerts");
+                  setActiveToast(null);
+                }}
+                className="py-1 px-2 rounded text-[10px] bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border border-border"
+              >
+                Inspect
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1610,14 +1761,14 @@ export function RightSidebar({
         </div>
       ) : activeTab === "alerts" ? (
         <div className="flex-1 flex flex-col overflow-hidden font-mono">
-          {/* Create Alert Form */}
+          {/* Create Alert Form (Dual Mode: Price Level vs Strategy / Indicator - DEC-079) */}
           <form
             onSubmit={handleCreateManualAlert}
             className="p-2.5 border-b border-border bg-surface-container-low flex flex-col gap-2"
           >
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold uppercase tracking-wider text-on-surface">
-                + Price Alert ({selectedSymbol.replace("USDT", "/USDT")})
+                + New Alert ({selectedSymbol.replace("USDT", "/USDT")})
               </span>
               <button
                 type="button"
@@ -1634,41 +1785,107 @@ export function RightSidebar({
               </button>
             </div>
 
-            <div className="grid grid-cols-12 gap-1.5">
-              <div className="col-span-5">
+            {/* Mode Selector Tabs */}
+            <div className="flex items-center gap-1 p-0.5 rounded bg-surface border border-border">
+              <button
+                type="button"
+                onClick={() => {
+                  setAlertFormMode("price");
+                  setNewAlertCondition("crossing");
+                  setNewAlertFrequency("only_once");
+                }}
+                className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${
+                  alertFormMode === "price"
+                    ? "bg-primary-container text-white shadow-xs"
+                    : "text-muted hover:text-on-surface"
+                }`}
+              >
+                Price Level
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAlertFormMode("strategy");
+                  setNewAlertCondition("strategy_any_order");
+                  setNewAlertFrequency("once_per_bar_close");
+                }}
+                className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${
+                  alertFormMode === "strategy"
+                    ? "bg-primary-container text-white shadow-xs"
+                    : "text-muted hover:text-on-surface"
+                }`}
+              >
+                Strategy / Indicator
+              </button>
+            </div>
+
+            {alertFormMode === "price" ? (
+              <div className="grid grid-cols-12 gap-1.5">
+                <div className="col-span-5">
+                  <select
+                    value={newAlertCondition}
+                    onChange={(e) => setNewAlertCondition(e.target.value as AlertCondition)}
+                    className="w-full bg-surface text-on-surface text-[11px] px-1.5 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
+                  >
+                    <option value="crossing">Crossing</option>
+                    <option value="crossing_up">Cross Up</option>
+                    <option value="crossing_down">Cross Down</option>
+                  </select>
+                </div>
+                <div className="col-span-7 relative flex items-center">
+                  <input
+                    type="number"
+                    step="any"
+                    value={newAlertPrice}
+                    onChange={(e) => setNewAlertPrice(e.target.value)}
+                    placeholder="Target Price..."
+                    className="w-full bg-surface text-on-surface text-[11px] pl-2 pr-12 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setNewAlertPrice(
+                        currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
+                      )
+                    }
+                    className="absolute right-1.5 text-[9px] px-1 py-0.5 rounded bg-surface-container-high text-muted hover:text-on-surface cursor-pointer"
+                    title="Set to current mark price"
+                  >
+                    Last
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
                 <select
                   value={newAlertCondition}
                   onChange={(e) => setNewAlertCondition(e.target.value as AlertCondition)}
                   className="w-full bg-surface text-on-surface text-[11px] px-1.5 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
                 >
-                  <option value="crossing">Crossing</option>
-                  <option value="crossing_up">Cross Up</option>
-                  <option value="crossing_down">Cross Down</option>
+                  <optgroup label="Strategy Order Signals">
+                    <option value="strategy_any_order">Strategy: Any Order Execution</option>
+                    <option value="strategy_entry_long">Strategy: Long Entry</option>
+                    <option value="strategy_entry_short">Strategy: Short Entry</option>
+                    <option value="strategy_close">Strategy: Close / Exit</option>
+                  </optgroup>
+                  <optgroup label="Indicator Conditions">
+                    <option value="indicator_bullish_cross">Indicator: Bullish Cross (EMA 9 &gt; 21)</option>
+                    <option value="indicator_bearish_cross">Indicator: Bearish Cross (EMA 9 &lt; 21)</option>
+                    <option value="indicator_oversold">Indicator: RSI Oversold (≤ 30)</option>
+                    <option value="indicator_overbought">Indicator: RSI Overbought (≥ 70)</option>
+                    <option value="indicator_bb_squeeze">Indicator: Bollinger Band Squeeze (≤ 2.2%)</option>
+                    <option value="script_condition">Script: alertcondition() Trigger</option>
+                  </optgroup>
                 </select>
-              </div>
-              <div className="col-span-7 relative flex items-center">
                 <input
-                  type="number"
-                  step="any"
-                  value={newAlertPrice}
-                  onChange={(e) => setNewAlertPrice(e.target.value)}
-                  placeholder="Target Price..."
-                  className="w-full bg-surface text-on-surface text-[11px] pl-2 pr-12 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
+                  type="text"
+                  value={newAlertScriptName}
+                  onChange={(e) => setNewAlertScriptName(e.target.value)}
+                  placeholder="Script / Indicator Name (optional)..."
+                  className="w-full bg-surface text-on-surface placeholder-muted text-[11px] px-2 py-1.5 rounded border border-border focus:outline-hidden focus:border-primary"
                 />
-                <button
-                  type="button"
-                  onClick={() =>
-                    setNewAlertPrice(
-                      currentPrice >= 1 ? currentPrice.toFixed(2) : currentPrice.toFixed(4)
-                    )
-                  }
-                  className="absolute right-1.5 text-[9px] px-1 py-0.5 rounded bg-surface-container-high text-muted hover:text-on-surface cursor-pointer"
-                  title="Set to current mark price"
-                >
-                  Last
-                </button>
               </div>
-            </div>
+            )}
 
             <div className="flex items-center gap-1.5">
               <input
@@ -1678,18 +1895,25 @@ export function RightSidebar({
                 placeholder="Alert note (optional)..."
                 className="flex-1 bg-surface text-on-surface placeholder-muted text-[11px] px-2 py-1 rounded border border-border focus:outline-hidden focus:border-primary"
               />
-              <button
-                type="button"
-                onClick={() =>
-                  setNewAlertFrequency((f) =>
-                    f === "only_once" ? "every_time" : "only_once"
-                  )
-                }
-                className="px-2 py-1 rounded text-[10px] bg-surface border border-border text-muted hover:text-on-surface shrink-0 cursor-pointer"
-                title="Toggle Trigger Frequency"
+              <select
+                value={newAlertFrequency}
+                onChange={(e) => setNewAlertFrequency(e.target.value as AlertFrequency)}
+                className="bg-surface text-on-surface text-[10px] px-1.5 py-1 rounded border border-border shrink-0 cursor-pointer focus:outline-hidden"
               >
-                {newAlertFrequency === "only_once" ? "Once" : "Every Time"}
-              </button>
+                {alertFormMode === "strategy" ? (
+                  <>
+                    <option value="once_per_bar_close">Bar Close</option>
+                    <option value="every_time">Every Tick</option>
+                    <option value="only_once">Once</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="only_once">Once</option>
+                    <option value="every_time">Every 60s</option>
+                    <option value="once_per_bar_close">Bar Close</option>
+                  </>
+                )}
+              </select>
               <button
                 type="submit"
                 className="px-2.5 py-1 rounded bg-primary-container hover:bg-primary text-white text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer transition-colors"
@@ -1709,8 +1933,8 @@ export function RightSidebar({
           <div className="flex-1 overflow-y-auto no-scrollbar divide-y divide-border/40">
             {alerts.length === 0 ? (
               <div className="p-4 text-center text-[11px] text-muted">
-                No alerts configured yet. Add a price level above or select any chart drawing and click the{" "}
-                <strong className="text-gold">Bell +</strong> icon.
+                No alerts configured yet. Add a price level or strategy condition above, or click the{" "}
+                <strong className="text-gold">Bell +</strong> icon on drawings/scripts.
               </div>
             ) : (
               alerts.map((a) => {
@@ -1724,7 +1948,7 @@ export function RightSidebar({
                     }`}
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span
                           onClick={() => onSelectSymbol(a.symbol)}
                           className="text-[10px] font-bold text-primary hover:underline cursor-pointer"
@@ -1732,8 +1956,13 @@ export function RightSidebar({
                           {a.symbol.replace("USDT", "/USDT")}
                         </span>
                         <span className="text-[9px] px-1 py-0.2 rounded bg-surface-container-high text-muted uppercase">
-                          {a.sourceType.replace("_", " ")}
+                          {a.sourceType.replace(/_/g, " ")}
                         </span>
+                        {a.scriptName && (
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-primary-container/20 text-primary truncate max-w-[100px]">
+                            {a.scriptName}
+                          </span>
+                        )}
                         <span
                           className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
                             a.active
@@ -1749,10 +1978,19 @@ export function RightSidebar({
                       </div>
                       <div className="text-[10px] text-muted flex items-center gap-2 mt-0.5">
                         <span>
-                          {a.condition.replace("_", " ").toUpperCase()} @{" "}
-                          <strong className="text-on-surface">${formattedTarget}</strong>
+                          {a.condition.replace(/_/g, " ").toUpperCase()}
+                          {a.sourceType === "strategy_order" || a.sourceType === "indicator_condition"
+                            ? ""
+                            : ` @ $${formattedTarget}`}
                         </span>
-                        <span>· {a.frequency === "only_once" ? "Once" : "Every 60s"}</span>
+                        <span>
+                          ·{" "}
+                          {a.frequency === "once_per_bar_close"
+                            ? "Bar Close"
+                            : a.frequency === "only_once"
+                            ? "Once"
+                            : "Every 60s"}
+                        </span>
                       </div>
                     </div>
 

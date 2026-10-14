@@ -20,6 +20,7 @@ export interface IndicatorWorkerMessageOutput {
   data?: Array<{ time: number; value: number | number[] }>;
   strategyResult?: BacktestPerformance;
   orderIntents?: StrategyOrderIntent[];
+  alertConditions?: Array<{ title: string; message: string; triggered: boolean; barIndex: number }>;
   error?: string;
   durationMs: number;
 }

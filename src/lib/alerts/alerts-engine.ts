@@ -1,14 +1,33 @@
 import { ChartDrawing } from "@/lib/chart/drawing-math";
+import { CandlestickBar } from "@/lib/mexc/types";
+import { StrategyOrderIntent } from "@/lib/strategy/types";
 
-export type AlertCondition = "crossing" | "crossing_up" | "crossing_down";
-export type AlertFrequency = "only_once" | "every_time";
+export type AlertCondition =
+  | "crossing"
+  | "crossing_up"
+  | "crossing_down"
+  | "strategy_entry_long"
+  | "strategy_entry_short"
+  | "strategy_close"
+  | "strategy_any_order"
+  | "indicator_bullish_cross"
+  | "indicator_bearish_cross"
+  | "indicator_oversold"
+  | "indicator_overbought"
+  | "indicator_bb_squeeze"
+  | "script_condition";
+
+export type AlertFrequency = "only_once" | "every_time" | "once_per_bar_close";
+
 export type AlertSourceType =
   | "price"
   | "horizontal_line"
   | "trendline"
   | "rectangle"
   | "position_tp"
-  | "position_sl";
+  | "position_sl"
+  | "strategy_order"
+  | "indicator_condition";
 
 export interface PriceAlert {
   id: string;
@@ -25,6 +44,11 @@ export interface PriceAlert {
   frequency: AlertFrequency;
   sourceType: AlertSourceType;
   drawingId?: string;
+  scriptId?: string;
+  scriptName?: string;
+  indicatorName?: string;
+  conditionMessage?: string;
+  lastTriggeredBarTime?: number;
   label: string;
   active: boolean;
   triggeredCount: number;
@@ -39,7 +63,10 @@ export interface AlertLogEntry {
   triggerPrice: number;
   targetPrice: number;
   condition: AlertCondition;
+  sourceType?: AlertSourceType;
+  strategyOrderSide?: "long" | "short";
   label: string;
+  message?: string;
   triggeredAt: number;
 }
 
@@ -115,8 +142,193 @@ export function evaluateAlertCrossing(
   return { triggered, effectiveTarget };
 }
 
+export interface StrategyAlertEvaluationContext {
+  symbol: string;
+  currentPrice: number;
+  prevPrice?: number;
+  currentTimeSec?: number;
+  currentBar?: CandlestickBar;
+  prevBar?: CandlestickBar;
+  isBarClosed?: boolean;
+  orderIntents?: StrategyOrderIntent[];
+  scriptAlertConditions?: Array<{ title: string; message: string; triggered: boolean }>;
+  rsi14?: number;
+  prevRsi14?: number;
+  emaFast?: number;
+  prevEmaFast?: number;
+  emaSlow?: number;
+  prevEmaSlow?: number;
+  bbWidthPct?: number;
+  nowMs?: number;
+}
+
 /**
- * Evaluates a batch of alerts for a specific `symbol` transition (`prevPrice` -> `currentPrice`).
+ * Pure evaluation of whether a strategy order intent or indicator condition triggers `alert`.
+ */
+export function evaluateStrategyConditionAlert(
+  alert: PriceAlert,
+  ctx: StrategyAlertEvaluationContext
+): { triggered: boolean; message?: string; orderSide?: "long" | "short" } {
+  if (!alert.active || alert.symbol !== ctx.symbol) {
+    return { triggered: false };
+  }
+
+  const nowMs = ctx.nowMs ?? Date.now();
+
+  // Cooldown check for "every_time"
+  if (
+    alert.frequency === "every_time" &&
+    typeof alert.lastTriggeredAt === "number" &&
+    nowMs - alert.lastTriggeredAt < ALERT_COOLDOWN_MS
+  ) {
+    return { triggered: false };
+  }
+
+  // Deduplication check for "once_per_bar_close"
+  if (alert.frequency === "once_per_bar_close") {
+    if (!ctx.isBarClosed && ctx.currentBar) {
+      return { triggered: false };
+    }
+    if (ctx.currentBar && alert.lastTriggeredBarTime === ctx.currentBar.time) {
+      return { triggered: false };
+    }
+  }
+
+  // 1. Strategy Order Alerts
+  if (alert.sourceType === "strategy_order") {
+    const orders = ctx.orderIntents || [];
+    if (alert.condition === "strategy_entry_long") {
+      const match = orders.find((o) => o.type === "ENTRY" && o.direction === "long");
+      if (match) {
+        return {
+          triggered: true,
+          message: `Strategy entered LONG @ $${ctx.currentPrice.toFixed(2)} (${match.orderId})`,
+          orderSide: "long",
+        };
+      }
+    } else if (alert.condition === "strategy_entry_short") {
+      const match = orders.find((o) => o.type === "ENTRY" && o.direction === "short");
+      if (match) {
+        return {
+          triggered: true,
+          message: `Strategy entered SHORT @ $${ctx.currentPrice.toFixed(2)} (${match.orderId})`,
+          orderSide: "short",
+        };
+      }
+    } else if (alert.condition === "strategy_close") {
+      const match = orders.find((o) => o.type === "CLOSE" || o.type === "EXIT");
+      if (match) {
+        return {
+          triggered: true,
+          message: `Strategy closed position @ $${ctx.currentPrice.toFixed(2)} (${match.orderId})`,
+        };
+      }
+    } else if (alert.condition === "strategy_any_order") {
+      const match = orders[0];
+      if (match) {
+        return {
+          triggered: true,
+          message: `Strategy order executed: ${match.type} ${match.direction || ""} @ $${ctx.currentPrice.toFixed(2)}`,
+          orderSide: match.direction,
+        };
+      }
+    }
+  }
+
+  // 2. Custom Script alertcondition()
+  if (alert.sourceType === "indicator_condition" && alert.condition === "script_condition") {
+    const matchedCond = (ctx.scriptAlertConditions || []).find(
+      (c) =>
+        c.triggered &&
+        (!alert.conditionMessage ||
+          c.title === alert.conditionMessage ||
+          c.title === alert.label)
+    );
+    if (matchedCond) {
+      return {
+        triggered: true,
+        message: matchedCond.message || `Custom condition "${matchedCond.title}" triggered`,
+      };
+    }
+  }
+
+  // 3. Built-in Technical Indicator Conditions
+  if (alert.sourceType === "indicator_condition") {
+    // EMA Golden Cross
+    if (alert.condition === "indicator_bullish_cross") {
+      if (
+        ctx.emaFast !== undefined &&
+        ctx.prevEmaFast !== undefined &&
+        ctx.emaSlow !== undefined &&
+        ctx.prevEmaSlow !== undefined
+      ) {
+        if (ctx.prevEmaFast <= ctx.prevEmaSlow && ctx.emaFast > ctx.emaSlow) {
+          return {
+            triggered: true,
+            message: `EMA Bullish Golden Cross (Fast ${ctx.emaFast.toFixed(2)} > Slow ${ctx.emaSlow.toFixed(2)})`,
+            orderSide: "long",
+          };
+        }
+      }
+    }
+    // EMA Death Cross
+    if (alert.condition === "indicator_bearish_cross") {
+      if (
+        ctx.emaFast !== undefined &&
+        ctx.prevEmaFast !== undefined &&
+        ctx.emaSlow !== undefined &&
+        ctx.prevEmaSlow !== undefined
+      ) {
+        if (ctx.prevEmaFast >= ctx.prevEmaSlow && ctx.emaFast < ctx.emaSlow) {
+          return {
+            triggered: true,
+            message: `EMA Bearish Death Cross (Fast ${ctx.emaFast.toFixed(2)} < Slow ${ctx.emaSlow.toFixed(2)})`,
+            orderSide: "short",
+          };
+        }
+      }
+    }
+    // RSI Oversold (<= 30)
+    if (alert.condition === "indicator_oversold") {
+      if (ctx.rsi14 !== undefined && ctx.prevRsi14 !== undefined) {
+        if (ctx.prevRsi14 >= 30 && ctx.rsi14 < 30) {
+          return {
+            triggered: true,
+            message: `RSI Oversold signal (${ctx.rsi14.toFixed(1)} ≤ 30)`,
+            orderSide: "long",
+          };
+        }
+      }
+    }
+    // RSI Overbought (>= 70)
+    if (alert.condition === "indicator_overbought") {
+      if (ctx.rsi14 !== undefined && ctx.prevRsi14 !== undefined) {
+        if (ctx.prevRsi14 <= 70 && ctx.rsi14 > 70) {
+          return {
+            triggered: true,
+            message: `RSI Overbought signal (${ctx.rsi14.toFixed(1)} ≥ 70)`,
+            orderSide: "short",
+          };
+        }
+      }
+    }
+    // Bollinger Band Squeeze (Width <= 2.2%)
+    if (alert.condition === "indicator_bb_squeeze") {
+      if (ctx.bbWidthPct !== undefined && ctx.bbWidthPct <= 2.2) {
+        return {
+          triggered: true,
+          message: `Bollinger Band Volatility Squeeze detected (${ctx.bbWidthPct.toFixed(2)}%)`,
+        };
+      }
+    }
+  }
+
+  return { triggered: false };
+}
+
+/**
+ * Evaluates a batch of alerts for a specific `symbol` transition (`prevPrice` -> `currentPrice`),
+ * supporting both price/drawing crossings and strategy/indicator conditions.
  * Returns updated alerts list and any newly generated `AlertLogEntry` items.
  */
 export function evaluateAlertsBatch(
@@ -125,21 +337,49 @@ export function evaluateAlertsBatch(
   prevPrice: number,
   currentPrice: number,
   currentTimeSec?: number,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  strategyContext?: Partial<StrategyAlertEvaluationContext>
 ): { updatedAlerts: PriceAlert[]; triggeredLogs: AlertLogEntry[] } {
   let changed = false;
   const triggeredLogs: AlertLogEntry[] = [];
 
+  const fullCtx: StrategyAlertEvaluationContext = {
+    symbol,
+    currentPrice,
+    prevPrice,
+    currentTimeSec,
+    nowMs,
+    ...strategyContext,
+  };
+
   const updatedAlerts = alerts.map((alert) => {
     if (alert.symbol !== symbol || !alert.active) return alert;
 
-    const { triggered, effectiveTarget } = evaluateAlertCrossing(
-      alert,
-      prevPrice,
-      currentPrice,
-      currentTimeSec,
-      nowMs
-    );
+    let triggered = false;
+    let effectiveTarget = alert.targetPrice;
+    let customMessage: string | undefined = undefined;
+    let orderSide: "long" | "short" | undefined = undefined;
+
+    if (
+      alert.sourceType === "strategy_order" ||
+      alert.sourceType === "indicator_condition"
+    ) {
+      const res = evaluateStrategyConditionAlert(alert, fullCtx);
+      triggered = res.triggered;
+      customMessage = res.message;
+      orderSide = res.orderSide;
+      effectiveTarget = currentPrice;
+    } else {
+      const res = evaluateAlertCrossing(
+        alert,
+        prevPrice,
+        currentPrice,
+        currentTimeSec,
+        nowMs
+      );
+      triggered = res.triggered;
+      effectiveTarget = res.effectiveTarget;
+    }
 
     if (!triggered) return alert;
 
@@ -151,7 +391,10 @@ export function evaluateAlertsBatch(
       triggerPrice: currentPrice,
       targetPrice: effectiveTarget,
       condition: alert.condition,
+      sourceType: alert.sourceType,
+      strategyOrderSide: orderSide,
       label: alert.label,
+      message: customMessage,
       triggeredAt: nowMs,
     });
 
@@ -160,6 +403,7 @@ export function evaluateAlertsBatch(
       active: alert.frequency === "only_once" ? false : true,
       triggeredCount: alert.triggeredCount + 1,
       lastTriggeredAt: nowMs,
+      lastTriggeredBarTime: fullCtx.currentBar ? fullCtx.currentBar.time : alert.lastTriggeredBarTime,
     };
   });
 

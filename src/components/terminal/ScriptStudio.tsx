@@ -15,6 +15,7 @@ import {
   Cpu,
   AlertCircle,
   Sparkles,
+  Bell,
 } from "lucide-react";
 import { indicatorSandbox } from "@/lib/indicators/sandbox";
 import { CandlestickBar } from "@/lib/mexc/types";
@@ -110,6 +111,29 @@ export function ScriptStudio({
             `[SUCCESS] '${activeName}' compiled in ${res.durationMs.toFixed(2)}ms. Output points: ${res.data?.length || 0}`,
             ...prev.slice(0, 15),
           ]);
+        }
+
+        // Dispatch strategy & indicator condition alerts evaluation (DEC-079)
+        if (
+          typeof window !== "undefined" &&
+          (res.orderIntents?.length || res.alertConditions?.length)
+        ) {
+          const lastBar = sampleBars[sampleBars.length - 1];
+          const currPrice = lastBar ? lastBar.close : 0;
+          const activeSym = localStorage.getItem("mochex:symbol") || "BTCUSDT";
+          window.dispatchEvent(
+            new CustomEvent("mochex:evaluate-strategy-alerts", {
+              detail: {
+                symbol: activeSym,
+                currentPrice: currPrice,
+                currentTimeSec: lastBar ? lastBar.time : Math.floor(Date.now() / 1000),
+                currentBar: lastBar,
+                isBarClosed: true,
+                orderIntents: res.orderIntents,
+                scriptAlertConditions: res.alertConditions,
+              },
+            })
+          );
         }
       } else {
         setCompileSuccess(false);
@@ -282,6 +306,26 @@ export function ScriptStudio({
           >
             <Plus size={12} />
             <span>Add to Chart</span>
+          </button>
+
+          {/* Set Alert */}
+          <button
+            onClick={() => {
+              window.dispatchEvent(
+                new CustomEvent("mochex:create-strategy-alert", {
+                  detail: {
+                    scriptName,
+                    code,
+                    condition: "strategy_any_order",
+                  },
+                })
+              );
+            }}
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container text-gold border border-gold/30 text-xs font-mono font-medium transition-colors shadow-xs"
+            title="Create Alert from this Strategy / Script"
+          >
+            <Bell size={12} className="text-gold" />
+            <span>Set Alert</span>
           </button>
 
           <div className="h-3 w-px bg-border" />

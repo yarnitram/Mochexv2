@@ -45,7 +45,18 @@ export class IndicatorSandbox {
 
         // Order intent recorder for Strategy testing
         const orderIntents: StrategyOrderIntent[] = [];
+        const alertConditions: Array<{ title: string; message: string; triggered: boolean; barIndex: number }> = [];
         let activeBarIndex = input.bars.length - 1;
+
+        const alertcondition = (condition: boolean, title: string, message?: string) => {
+          const isTriggered = Boolean(condition);
+          alertConditions.push({
+            title: title || "Script Alert",
+            message: message || title || "Alert condition met",
+            triggered: isTriggered,
+            barIndex: activeBarIndex,
+          });
+        };
 
         const createStrategyMethods = (getIdx: () => number) => ({
           entry: (id: string, direction: OrderDirection, options?: any) => {
@@ -89,6 +100,7 @@ export class IndicatorSandbox {
 
         const strategyProxy: any = {
           ...defaultMethods,
+          alertcondition,
           get barIndex() {
             return activeBarIndex;
           },
@@ -114,6 +126,7 @@ export class IndicatorSandbox {
           "ta",
           "strategy",
           "restricted",
+          "alertcondition",
           `
           "use strict";
           const { fetch, WebSocket, XMLHttpRequest, localStorage, sessionStorage, document, window, process } = restricted;
@@ -121,11 +134,11 @@ export class IndicatorSandbox {
           if (typeof calculate !== "function") {
             throw new Error("Script must define a 'calculate(bars, inputs, ta)' function.");
           }
-          return calculate(bars, inputs, ta, strategy);
+          return calculate(bars, inputs, ta, strategy, alertcondition);
         `
         );
 
-        const result = sandboxFunction(input.bars, input.inputs, ta, strategyProxy, restrictedScope);
+        const result = sandboxFunction(input.bars, input.inputs, ta, strategyProxy, restrictedScope, alertcondition);
 
         clearTimeout(timer);
         if (isTimedOut) return;
@@ -156,6 +169,7 @@ export class IndicatorSandbox {
           data: result,
           strategyResult,
           orderIntents,
+          alertConditions,
           durationMs: performance.now() - startTime,
         });
       } catch (err: any) {

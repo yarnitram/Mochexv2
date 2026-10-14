@@ -3,6 +3,7 @@ import {
   PriceAlert,
   evaluateAlertCrossing,
   evaluateAlertsBatch,
+  evaluateStrategyConditionAlert,
   getEffectiveAlertTargetPrice,
   createAlertsFromDrawing,
   ALERT_COOLDOWN_MS,
@@ -139,5 +140,217 @@ describe("Live Price & Drawing Crossing Alerts Engine (DEC-069)", () => {
     expect(posAlerts[1].sourceType).toBe("position_sl");
     expect(posAlerts[1].condition).toBe("crossing_down");
     expect(posAlerts[1].targetPrice).toBe(67200);
+  });
+});
+
+describe("Custom Strategy Condition Alerts Engine (DEC-079)", () => {
+  const stratAlert: PriceAlert = {
+    id: "strat-alert-1",
+    symbol: "BTCUSDT",
+    targetPrice: 0,
+    condition: "strategy_entry_long",
+    frequency: "once_per_bar_close",
+    sourceType: "strategy_order",
+    label: "Strategy Long Entry Alert",
+    active: true,
+    triggeredCount: 0,
+    createdAt: 1700000000000,
+  };
+
+  it("evaluates Strategy Entry Long and Short orders accurately", () => {
+    // 1. Long Entry
+    const resLong = evaluateStrategyConditionAlert(stratAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      currentBar: { time: 1000, open: 68000, high: 68600, low: 67900, close: 68500, volume: 10 },
+      orderIntents: [
+        {
+          barIndex: 10,
+          time: 1000,
+          type: "ENTRY",
+          orderId: "buy-trend",
+          direction: "long",
+        },
+      ],
+    });
+    expect(resLong.triggered).toBe(true);
+    expect(resLong.orderSide).toBe("long");
+    expect(resLong.message).toContain("Strategy entered LONG @ $68500.00");
+
+    // 2. Short Entry
+    const shortAlert: PriceAlert = {
+      ...stratAlert,
+      id: "strat-short-1",
+      condition: "strategy_entry_short",
+    };
+    const resShort = evaluateStrategyConditionAlert(shortAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      orderIntents: [
+        {
+          barIndex: 10,
+          time: 1000,
+          type: "ENTRY",
+          orderId: "sell-breakdown",
+          direction: "short",
+        },
+      ],
+    });
+    expect(resShort.triggered).toBe(true);
+    expect(resShort.orderSide).toBe("short");
+    expect(resShort.message).toContain("Strategy entered SHORT");
+  });
+
+  it("enforces once_per_bar_close frequency deduplication", () => {
+    const alertWithHistory: PriceAlert = {
+      ...stratAlert,
+      lastTriggeredBarTime: 1000,
+    };
+
+    // Should not trigger on same bar 1000
+    const resSameBar = evaluateStrategyConditionAlert(alertWithHistory, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      currentBar: { time: 1000, open: 68000, high: 68600, low: 67900, close: 68500, volume: 10 },
+      orderIntents: [{ barIndex: 10, time: 1000, type: "ENTRY", orderId: "b1", direction: "long" }],
+    });
+    expect(resSameBar.triggered).toBe(false);
+
+    // Should not trigger if bar is not yet closed
+    const resUnclosed = evaluateStrategyConditionAlert(stratAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: false,
+      currentBar: { time: 2000, open: 68000, high: 68600, low: 67900, close: 68500, volume: 10 },
+      orderIntents: [{ barIndex: 11, time: 2000, type: "ENTRY", orderId: "b1", direction: "long" }],
+    });
+    expect(resUnclosed.triggered).toBe(false);
+
+    // Should trigger on new closed bar 2000
+    const resNewBar = evaluateStrategyConditionAlert(alertWithHistory, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      currentBar: { time: 2000, open: 68000, high: 68600, low: 67900, close: 68500, volume: 10 },
+      orderIntents: [{ barIndex: 11, time: 2000, type: "ENTRY", orderId: "b1", direction: "long" }],
+    });
+    expect(resNewBar.triggered).toBe(true);
+  });
+
+  it("evaluates custom script alertcondition() matches", () => {
+    const scriptAlert: PriceAlert = {
+      id: "script-1",
+      symbol: "BTCUSDT",
+      targetPrice: 0,
+      condition: "script_condition",
+      frequency: "once_per_bar_close",
+      sourceType: "indicator_condition",
+      label: "Custom Script Alert",
+      active: true,
+      triggeredCount: 0,
+      createdAt: 1700000000000,
+    };
+
+    const res = evaluateStrategyConditionAlert(scriptAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      scriptAlertConditions: [
+        { title: "RSI Dip", message: "RSI entered deep oversold territory", triggered: true },
+      ],
+    });
+    expect(res.triggered).toBe(true);
+    expect(res.message).toBe("RSI entered deep oversold territory");
+  });
+
+  it("evaluates EMA cross, RSI oversold/overbought, and BB squeeze indicators", () => {
+    // 1. EMA Golden Cross
+    const emaAlert: PriceAlert = {
+      ...stratAlert,
+      id: "ema-cross-1",
+      condition: "indicator_bullish_cross",
+      sourceType: "indicator_condition",
+    };
+    const resEma = evaluateStrategyConditionAlert(emaAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      prevEmaFast: 68100,
+      prevEmaSlow: 68150,
+      emaFast: 68250,
+      emaSlow: 68200,
+    });
+    expect(resEma.triggered).toBe(true);
+    expect(resEma.orderSide).toBe("long");
+
+    // 2. RSI Oversold
+    const rsiAlert: PriceAlert = {
+      ...stratAlert,
+      id: "rsi-os-1",
+      condition: "indicator_oversold",
+      sourceType: "indicator_condition",
+    };
+    const resRsi = evaluateStrategyConditionAlert(rsiAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      prevRsi14: 32,
+      rsi14: 28,
+    });
+    expect(resRsi.triggered).toBe(true);
+    expect(resRsi.orderSide).toBe("long");
+
+    // 3. Bollinger Band Squeeze
+    const bbAlert: PriceAlert = {
+      ...stratAlert,
+      id: "bb-sq-1",
+      condition: "indicator_bb_squeeze",
+      sourceType: "indicator_condition",
+    };
+    const resBb = evaluateStrategyConditionAlert(bbAlert, {
+      symbol: "BTCUSDT",
+      currentPrice: 68500,
+      isBarClosed: true,
+      bbWidthPct: 1.8,
+    });
+    expect(resBb.triggered).toBe(true);
+    expect(resBb.message).toContain("Bollinger Band Volatility Squeeze");
+  });
+
+  it("evaluates batch of hybrid price & strategy alerts seamlessly", () => {
+    const priceAlert: PriceAlert = {
+      id: "p-1",
+      symbol: "BTCUSDT",
+      targetPrice: 68500,
+      condition: "crossing_up",
+      frequency: "only_once",
+      sourceType: "price",
+      label: "BTC 68.5k Breakout",
+      active: true,
+      triggeredCount: 0,
+      createdAt: 1700000000000,
+    };
+
+    const batch = evaluateAlertsBatch(
+      [priceAlert, stratAlert],
+      "BTCUSDT",
+      68400,
+      68550,
+      1000,
+      1700000000000,
+      {
+        isBarClosed: true,
+        currentBar: { time: 1000, open: 68000, high: 68600, low: 67900, close: 68550, volume: 10 },
+        orderIntents: [{ barIndex: 10, time: 1000, type: "ENTRY", orderId: "b1", direction: "long" }],
+      }
+    );
+
+    expect(batch.triggeredLogs).toHaveLength(2);
+    expect(batch.triggeredLogs[0].alertId).toBe("p-1");
+    expect(batch.triggeredLogs[1].alertId).toBe("strat-alert-1");
+    expect(batch.triggeredLogs[1].strategyOrderSide).toBe("long");
   });
 });
