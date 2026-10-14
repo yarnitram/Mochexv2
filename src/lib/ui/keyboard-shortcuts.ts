@@ -40,6 +40,15 @@ const ALT_CODE_MAP: Record<string, ChartShortcutAction> = {
   KeyI: "invert_scale",
 };
 
+const ALT_KEY_MAP: Record<string, ChartShortcutAction> = {
+  r: "reset_view",
+  h: "horizontal_line",
+  t: "trendline",
+  f: "fibonacci",
+  a: "create_alert",
+  i: "invert_scale",
+};
+
 /**
  * Resolves a keyboard event to a chart shortcut action, or null when it is not a shortcut.
  */
@@ -47,7 +56,13 @@ export function matchChartShortcut(e: ShortcutKeyInput): ChartShortcutAction | n
   if (e.ctrlKey || e.metaKey) return null;
 
   if (e.altKey && !e.shiftKey) {
-    return ALT_CODE_MAP[e.code] ?? null;
+    const fromCode = ALT_CODE_MAP[e.code];
+    if (fromCode) return fromCode;
+    if (e.key) {
+      const fromKey = ALT_KEY_MAP[e.key.toLowerCase()];
+      if (fromKey) return fromKey;
+    }
+    return null;
   }
 
   if (!e.altKey && e.key === "?") {

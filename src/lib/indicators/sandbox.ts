@@ -143,11 +143,37 @@ export class IndicatorSandbox {
         clearTimeout(timer);
         if (isTimedOut) return;
 
-        if (!Array.isArray(result)) {
+        let outputData: Array<{ time: number; value: number | number[] }> | undefined = undefined;
+        let outputBoxes: any[] | undefined = undefined;
+
+        if (Array.isArray(result)) {
+          // Check if array contains boxes (e.g. { top, bottom, startTime }) or standard points ({ time, value })
+          if (result.length > 0 && ("top" in result[0] || "bottom" in result[0])) {
+            outputBoxes = result;
+          } else {
+            outputData = result;
+          }
+        } else if (result && typeof result === "object") {
+          if (Array.isArray(result.boxes)) {
+            outputBoxes = result.boxes;
+          }
+          if (Array.isArray(result.data)) {
+            outputData = result.data;
+          }
+          if (!outputBoxes && !outputData && orderIntents.length === 0) {
+            resolve({
+              scriptId: input.scriptId,
+              success: false,
+              error: "calculate() must return an array of { time, value } points or an object with { boxes: [...] }",
+              durationMs: performance.now() - startTime,
+            });
+            return;
+          }
+        } else if (orderIntents.length === 0) {
           resolve({
             scriptId: input.scriptId,
             success: false,
-            error: "calculate() must return an array of { time, value } objects.",
+            error: "calculate() must return an array of { time, value } objects or an array of rectangle boxes.",
             durationMs: performance.now() - startTime,
           });
           return;
@@ -166,7 +192,8 @@ export class IndicatorSandbox {
         resolve({
           scriptId: input.scriptId,
           success: true,
-          data: result,
+          data: outputData,
+          boxes: outputBoxes,
           strategyResult,
           orderIntents,
           alertConditions,

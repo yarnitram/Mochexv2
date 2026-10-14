@@ -81,6 +81,12 @@ export default function WorkstationPage() {
   const [strategyResult, setStrategyResult] = useState<BacktestPerformance | null>(null);
   const [activeStrategyName, setActiveStrategyName] = useState<string>(STRATEGY_PRESETS[0].name);
   const [focusedTrade, setFocusedTrade] = useState<BacktestTrade | null>(null);
+  const [customIndicatorData, setCustomIndicatorData] = useState<{
+    name: string;
+    data: Array<{ time: number; value: number }>;
+    color?: string;
+  } | null>(null);
+  const [customIndicatorBoxes, setCustomIndicatorBoxes] = useState<any[] | null>(null);
 
   // Active tools & indicators
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingToolType>("crosshair");
@@ -183,7 +189,11 @@ export default function WorkstationPage() {
       }
 
       if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
-      if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
+      // Script Studio always defaults to closed on fresh page load (DEC-086)
+      setIsStudioOpen(false);
+      try {
+        localStorage.setItem("mochex:studio_open", "false");
+      } catch {}
       if (savedScreener !== null) setIsScreenerOpen(savedScreener === "true");
       if (savedIndicators) setActiveIndicators(JSON.parse(savedIndicators));
       if (savedFavs) setFavoriteTools(JSON.parse(savedFavs));
@@ -219,6 +229,15 @@ export default function WorkstationPage() {
           if (prev.layoutMode === "1x1") return prev;
           return toggleMaximizePane(prev, prev.activePaneId);
         });
+        return;
+      }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyR" || e.key?.toLowerCase() === "r")) {
+        e.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent("mochex:reset-view", {
+            detail: { paneId: gridState.activePaneId },
+          })
+        );
         return;
       }
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyS") {
@@ -705,6 +724,15 @@ export default function WorkstationPage() {
                     onToggleFavorite={handleToggleFavoriteTool}
                     showFavoritesBar={showFavoritesBar && isPaneActive}
                     onToggleFavoritesBar={handleToggleFavoritesBar}
+                    customIndicatorData={isPaneActive ? customIndicatorData : null}
+                    customScriptBoxes={isPaneActive ? customIndicatorBoxes : null}
+                    onClearCustomIndicator={() => {
+                      setCustomIndicatorData(null);
+                      setCustomIndicatorBoxes(null);
+                      if (customIndicatorData?.name) {
+                        setActiveIndicators((prev) => prev.filter((i) => i !== customIndicatorData.name));
+                      }
+                    }}
                   />
                 </div>
               );
@@ -779,16 +807,38 @@ export default function WorkstationPage() {
           {/* Bottom Script Studio (Collapsible Split Panel) */}
           <ScriptStudio
             isOpen={isStudioOpen}
-            onClose={() => setIsStudioOpen(false)}
+            onClose={() => {
+              setIsStudioOpen(false);
+              try {
+                localStorage.setItem("mochex:studio_open", "false");
+              } catch {}
+            }}
             sampleBars={cachedBars}
             onStrategyResult={(res, name) => {
               setStrategyResult(res);
               if (name) setActiveStrategyName(name);
+              setActiveIndicators((prev) =>
+                prev.includes("Strategy Equity Curve & Underwater Drawdown")
+                  ? prev
+                  : [...prev, "Strategy Equity Curve & Underwater Drawdown"]
+              );
             }}
             onSelectTrade={(trade) => setFocusedTrade(trade)}
-            onApplyIndicator={(name) => {
+            onApplyIndicator={(name, code, data, boxes) => {
               handleApplyIndicator(name);
-              setIsStudioOpen(false);
+              if (data && data.length > 0) {
+                setCustomIndicatorData({ name, data, color: "#00d8ff" });
+              }
+              if (boxes && boxes.length > 0) {
+                if (typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("mochex:add-script-drawings", {
+                      detail: { boxes },
+                    })
+                  );
+                }
+              }
+              // Keep studio dock open so user can inspect or iterate
             }}
           />
         </div>
@@ -816,8 +866,15 @@ export default function WorkstationPage() {
         onApplyTemplate={handleApplyTemplate}
         activeIndicators={activeIndicators}
         initialTab={indicatorsModalTab}
-        onEditInStudio={() => {
+        onEditInStudio={(item) => {
           setIsStudioOpen(true);
+          if (item) {
+            window.dispatchEvent(
+              new CustomEvent("mochex:open-script-studio", {
+                detail: { script: item },
+              })
+            );
+          }
         }}
       />
 

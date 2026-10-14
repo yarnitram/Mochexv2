@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { CandlestickBar } from "@/lib/mexc/types";
 import { mexcClient } from "@/lib/mexc/client";
 import { mexcWsManager } from "@/lib/mexc/websocket";
@@ -19,6 +19,7 @@ import {
   createOrderInputFromDrawing,
   calculatePositionUnrealizedPnl,
 } from "@/lib/trading/paper-trading-engine";
+import { computeUnmitigatedFvgs, FvgZone } from "@/lib/indicators/fvg-engine";
 import {
   ChartDrawing,
   calculateFibLevels,
@@ -109,6 +110,13 @@ interface TradingViewContainerProps {
   onToggleFavorite?: (tool: DrawingToolType) => void;
   showFavoritesBar?: boolean;
   onToggleFavoritesBar?: () => void;
+  customIndicatorData?: {
+    name: string;
+    data: Array<{ time: number; value: number }>;
+    color?: string;
+  } | null;
+  onClearCustomIndicator?: () => void;
+  customScriptBoxes?: any[] | null;
 }
 
 declare global {
@@ -125,6 +133,8 @@ interface HoveredStats {
   volume?: number;
   ema20?: number;
   ema50?: number;
+  ema100?: number;
+  ema200?: number;
   bbUpper?: number;
   bbMiddle?: number;
   bbLower?: number;
@@ -161,6 +171,9 @@ export function TradingViewContainer({
   onToggleFavorite,
   showFavoritesBar = false,
   onToggleFavoritesBar,
+  customIndicatorData = null,
+  onClearCustomIndicator,
+  customScriptBoxes = null,
 }: TradingViewContainerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartMountRef = useRef<HTMLDivElement>(null);
@@ -172,6 +185,8 @@ export function TradingViewContainer({
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const ema20SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ema50SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const ema100SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const ema200SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bbUpperSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bbMiddleSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bbLowerSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -182,6 +197,7 @@ export function TradingViewContainer({
   const strategyEquitySeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const strategyBuyHoldSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const strategyDrawdownSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const customIndicatorSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   // Sub-pane & Volume Profile configurable parameters (DEC-037, DEC-038, DEC-071)
@@ -280,6 +296,7 @@ export function TradingViewContainer({
   const [hoveredHandle, setHoveredHandle] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const isDrawingMode = activeDrawingTool !== "none" && activeDrawingTool !== "crosshair";
 
   // Undo / Redo History Engine Refs (DEC-068)
   const drawingsRef = useRef<ChartDrawing[]>([]);
@@ -381,22 +398,38 @@ export function TradingViewContainer({
       },
     });
 
-    // 2.3 Gold EMA 20 & Cyan EMA 50 Overlays
+    // 2.3 4 EMA Ribbon Suite (20 White, 50 Blue, 100 Yellow, 200 Orange)
     const ema20Series = chart.addSeries(LineSeries, {
-      color: "#f5ac37",
-      lineWidth: 2,
+      color: "#ffffff",
+      lineWidth: 1,
       priceScaleId: "right",
       title: "EMA 20",
     });
     ema20SeriesRef.current = ema20Series;
 
     const ema50Series = chart.addSeries(LineSeries, {
-      color: "#00d8ff",
+      color: "#2962ff",
       lineWidth: 2,
       priceScaleId: "right",
       title: "EMA 50",
     });
     ema50SeriesRef.current = ema50Series;
+
+    const ema100Series = chart.addSeries(LineSeries, {
+      color: "#f5ac37",
+      lineWidth: 3,
+      priceScaleId: "right",
+      title: "EMA 100",
+    });
+    ema100SeriesRef.current = ema100Series;
+
+    const ema200Series = chart.addSeries(LineSeries, {
+      color: "#ff7043",
+      lineWidth: 4,
+      priceScaleId: "right",
+      title: "EMA 200",
+    });
+    ema200SeriesRef.current = ema200Series;
 
     // 2.3b Bollinger Bands Overlays
     const bbUpperSeries = chart.addSeries(LineSeries, {
@@ -459,6 +492,8 @@ export function TradingViewContainer({
       const volData = param.seriesData.get(volumeSeries) as HistogramData<Time> | undefined;
       const ema20Data = param.seriesData.get(ema20Series) as LineData<Time> | undefined;
       const ema50Data = param.seriesData.get(ema50Series) as LineData<Time> | undefined;
+      const ema100Data = param.seriesData.get(ema100Series) as LineData<Time> | undefined;
+      const ema200Data = param.seriesData.get(ema200Series) as LineData<Time> | undefined;
       const bbUpperData = param.seriesData.get(bbUpperSeries) as LineData<Time> | undefined;
       const bbMiddleData = param.seriesData.get(bbMiddleSeries) as LineData<Time> | undefined;
       const bbLowerData = param.seriesData.get(bbLowerSeries) as LineData<Time> | undefined;
@@ -493,6 +528,8 @@ export function TradingViewContainer({
           volume: volData?.value,
           ema20: ema20Data?.value,
           ema50: ema50Data?.value,
+          ema100: ema100Data?.value,
+          ema200: ema200Data?.value,
           bbUpper: bbUpperData?.value,
           bbMiddle: bbMiddleData?.value,
           bbLower: bbLowerData?.value,
@@ -560,6 +597,8 @@ export function TradingViewContainer({
             volumeSeries.setData(formatVolumeData(merged));
             ema20Series.setData(buildEmaLineData(merged, 20));
             ema50Series.setData(buildEmaLineData(merged, 50));
+            ema100Series.setData(buildEmaLineData(merged, 100));
+            ema200Series.setData(buildEmaLineData(merged, 200));
             const bbData = buildBollingerBandsData(merged, 20, 2);
             bbUpperSeries.setData(bbData.upper);
             bbMiddleSeries.setData(bbData.middle);
@@ -617,6 +656,8 @@ export function TradingViewContainer({
       volumeSeriesRef.current = null;
       ema20SeriesRef.current = null;
       ema50SeriesRef.current = null;
+      ema100SeriesRef.current = null;
+      ema200SeriesRef.current = null;
       bbUpperSeriesRef.current = null;
       bbMiddleSeriesRef.current = null;
       bbLowerSeriesRef.current = null;
@@ -624,6 +665,7 @@ export function TradingViewContainer({
       macdLineSeriesRef.current = null;
       macdSignalSeriesRef.current = null;
       macdHistSeriesRef.current = null;
+      customIndicatorSeriesRef.current = null;
       markersPluginRef.current = null;
     };
   }, [hasLibrary]);
@@ -677,6 +719,8 @@ export function TradingViewContainer({
           volumeSeriesRef.current?.setData(formatVolumeData(merged));
           ema20SeriesRef.current?.setData(buildEmaLineData(merged, 20));
           ema50SeriesRef.current?.setData(buildEmaLineData(merged, 50));
+          ema100SeriesRef.current?.setData(buildEmaLineData(merged, 100));
+          ema200SeriesRef.current?.setData(buildEmaLineData(merged, 200));
           const bbData = buildBollingerBandsData(merged, 20, 2);
           bbUpperSeriesRef.current?.setData(bbData.upper);
           bbMiddleSeriesRef.current?.setData(bbData.middle);
@@ -800,6 +844,8 @@ export function TradingViewContainer({
             volumeSeriesRef.current.setData(formatVolumeData(sorted));
             ema20SeriesRef.current.setData(buildEmaLineData(sorted, 20));
             ema50SeriesRef.current.setData(buildEmaLineData(sorted, 50));
+            ema100SeriesRef.current?.setData(buildEmaLineData(sorted, 100));
+            ema200SeriesRef.current?.setData(buildEmaLineData(sorted, 200));
             const bbData = buildBollingerBandsData(sorted, 20, 2);
             bbUpperSeriesRef.current?.setData(bbData.upper);
             bbMiddleSeriesRef.current?.setData(bbData.middle);
@@ -924,6 +970,20 @@ export function TradingViewContainer({
             ema50SeriesRef.current?.update({ time: barTime, value: latestEma50 });
           }
         }
+        if (closes.length >= 100) {
+          const ema100Vals = ta.ema(closes, 100);
+          const latestEma100 = ema100Vals[ema100Vals.length - 1];
+          if (!isNaN(latestEma100)) {
+            ema100SeriesRef.current?.update({ time: barTime, value: latestEma100 });
+          }
+        }
+        if (closes.length >= 200) {
+          const ema200Vals = ta.ema(closes, 200);
+          const latestEma200 = ema200Vals[ema200Vals.length - 1];
+          if (!isNaN(latestEma200)) {
+            ema200SeriesRef.current?.update({ time: barTime, value: latestEma200 });
+          }
+        }
 
         // Update latest RSI point
         if (closes.length >= rsiPeriod + 1 && rsiSeriesRef.current) {
@@ -978,6 +1038,8 @@ export function TradingViewContainer({
         volumeSeriesRef.current.setData(formatVolumeData(targetBars));
         ema20SeriesRef.current.setData(buildEmaLineData(targetBars, 20));
         ema50SeriesRef.current.setData(buildEmaLineData(targetBars, 50));
+        ema100SeriesRef.current?.setData(buildEmaLineData(targetBars, 100));
+        ema200SeriesRef.current?.setData(buildEmaLineData(targetBars, 200));
         const bbData = buildBollingerBandsData(targetBars, 20, 2);
         bbUpperSeriesRef.current?.setData(bbData.upper);
         bbMiddleSeriesRef.current?.setData(bbData.middle);
@@ -1099,6 +1161,8 @@ export function TradingViewContainer({
 
     ema20SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
     ema50SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
+    ema100SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
+    ema200SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
     bbUpperSeriesRef.current?.applyOptions({ visible: hasBollinger });
     bbMiddleSeriesRef.current?.applyOptions({ visible: hasBollinger });
     bbLowerSeriesRef.current?.applyOptions({ visible: hasBollinger });
@@ -1380,6 +1444,54 @@ export function TradingViewContainer({
     showUnderwaterDrawdown,
     bars,
   ]);
+
+  // Dynamic Custom Script Indicator Overlay Series
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    if (customIndicatorSeriesRef.current) {
+      try {
+        chart.removeSeries(customIndicatorSeriesRef.current);
+      } catch {}
+      customIndicatorSeriesRef.current = null;
+    }
+
+    if (customIndicatorData && customIndicatorData.data && customIndicatorData.data.length > 0) {
+      try {
+        const series = chart.addSeries(LineSeries, {
+          color: customIndicatorData.color || "#00d8ff",
+          lineWidth: 2,
+          priceScaleId: "right",
+          title: customIndicatorData.name,
+        });
+
+        const formatted = customIndicatorData.data
+          .filter((d) => d && d.time !== undefined && typeof d.value === "number" && !isNaN(d.value))
+          .map((d) => ({
+            time: (d.time > 1e11 ? Math.floor(d.time / 1000) : d.time) as Time,
+            value: Number(d.value),
+          }))
+          .sort((a, b) => Number(a.time) - Number(b.time));
+
+        const deduplicated: Array<{ time: Time; value: number }> = [];
+        for (const pt of formatted) {
+          if (deduplicated.length === 0 || deduplicated[deduplicated.length - 1].time !== pt.time) {
+            deduplicated.push(pt);
+          } else {
+            deduplicated[deduplicated.length - 1].value = pt.value;
+          }
+        }
+
+        if (deduplicated.length > 0) {
+          series.setData(deduplicated);
+          customIndicatorSeriesRef.current = series;
+        }
+      } catch (err) {
+        console.error("Failed to render custom indicator series", err);
+      }
+    }
+  }, [customIndicatorData]);
 
   // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
   const DRAWING_COLORS = [
@@ -1767,15 +1879,58 @@ export function TradingViewContainer({
       setInFlightDrawing(null);
       setDrawingStep(0);
     };
+    const handleAddScriptDrawings = (e: Event) => {
+      if (!isActivePane) return;
+      const detail = (e as CustomEvent<{ boxes: any[] }>).detail;
+      if (!detail || !detail.boxes || !Array.isArray(detail.boxes)) return;
+      const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
+      const newDrawings: ChartDrawing[] = detail.boxes.map((box, bIdx) => ({
+        id: box.id || `fvg_${Date.now()}_${bIdx}`,
+        name: box.label || (box.type ? `${box.type} FVG` : `Script Box ${bIdx + 1}`),
+        type: "rectangle",
+        startTime: box.startTime,
+        startPrice: box.top !== undefined ? box.top : (box.startPrice ?? 0),
+        endTime: box.endTime || latestBarTime,
+        endPrice: box.bottom !== undefined ? box.bottom : (box.endPrice ?? 0),
+        color: box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
+        fillColor: box.fillColor || box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
+        fillOpacity: 0.18,
+        lineWidth: 1,
+        lineStyle: "solid",
+        showMidLine: box.showMidLine !== undefined ? box.showMidLine : true,
+        midLineColor: box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
+        midLineStyle: "dashed",
+        extendRight: false,
+        text: box.label || (box.type ? `${box.type} FVG (Unmitigated)` : ""),
+        fontSize: 10,
+        textAlign: "right",
+        textVAlign: "top",
+      }));
+      if (newDrawings.length > 0) {
+        const existingIds = new Set(drawingsRef.current.map((d) => d.id));
+        const filteredNew = newDrawings.filter((d) => !existingIds.has(d.id));
+        const updated = [
+          ...drawingsRef.current.map((d) => {
+            const match = newDrawings.find((nd) => nd.id === d.id);
+            return match || d;
+          }),
+          ...filteredNew,
+        ];
+        saveDrawings(updated);
+        setSelectedDrawingId(newDrawings[0].id);
+      }
+    };
     window.addEventListener("mochex:clear-drawings", handleClearDrawings);
+    window.addEventListener("mochex:add-script-drawings", handleAddScriptDrawings);
     window.addEventListener("mochex:undo", handleUndo);
     window.addEventListener("mochex:redo", handleRedo);
     return () => {
       window.removeEventListener("mochex:clear-drawings", handleClearDrawings);
+      window.removeEventListener("mochex:add-script-drawings", handleAddScriptDrawings);
       window.removeEventListener("mochex:undo", handleUndo);
       window.removeEventListener("mochex:redo", handleRedo);
     };
-  }, [saveDrawings, handleUndo, handleRedo]);
+  }, [isActivePane, saveDrawings, handleUndo, handleRedo]);
 
   // Specialized Geometric Renderers (DEC-041, DEC-046, DEC-047)
   const renderTrendline = useCallback(
@@ -3263,6 +3418,92 @@ export function TradingViewContainer({
       }
     }
 
+    // Render Unmitigated Fair Value Gap Rectangles (0% Wick Touch)
+    if (activeFvgZones.length > 0 && !isDrawingsHidden) {
+      const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
+      const latestX = getSafeScreenX(latestBarTime) || rect.width;
+
+      activeFvgZones.forEach((zone) => {
+        const x1 = getSafeScreenX(zone.startTime);
+        const y1 = getSafeScreenY(zone.top);
+        const y2 = getSafeScreenY(zone.bottom);
+
+        if (x1 !== null && y1 !== null && y2 !== null) {
+          const rightX = Math.max(x1 + 40, latestX);
+          renderRectangle(
+            ctx,
+            x1,
+            y1,
+            rightX,
+            y2,
+            {
+              id: zone.id,
+              type: "rectangle",
+              startTime: zone.startTime,
+              startPrice: zone.top,
+              endTime: latestBarTime,
+              endPrice: zone.bottom,
+              color: zone.color,
+              fillColor: zone.fillColor,
+              fillOpacity: 0.18,
+              lineWidth: 1,
+              showMidLine: true,
+              midLineColor: zone.color,
+              midLineStyle: "dashed",
+              extendRight: false,
+              text: `${zone.timeframe ? zone.timeframe + " " : ""}${zone.type === "BULLISH" ? "Bull FVG" : "Bear FVG"}`,
+              fontSize: 10,
+              textAlign: "right",
+              textVAlign: "top",
+            } as any,
+            rect.width
+          );
+        }
+      });
+    }
+
+    // Render Custom Script Boxes (DEC-082)
+    if (customScriptBoxes && customScriptBoxes.length > 0 && !isDrawingsHidden) {
+      const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
+      customScriptBoxes.forEach((box, bIdx) => {
+        const x1 = getSafeScreenX(box.startTime);
+        const y1 = getSafeScreenY(box.top);
+        const y2 = getSafeScreenY(box.bottom);
+
+        if (x1 !== null && y1 !== null && y2 !== null) {
+          const x2 = box.endTime ? (getSafeScreenX(box.endTime) || rect.width) : (getSafeScreenX(latestBarTime) || rect.width);
+          renderRectangle(
+            ctx,
+            x1,
+            y1,
+            Math.max(x1 + 30, x2),
+            y2,
+            {
+              id: box.id || `custom-box-${bIdx}`,
+              type: "rectangle",
+              startTime: box.startTime,
+              startPrice: box.top,
+              endTime: box.endTime || latestBarTime,
+              endPrice: box.bottom,
+              color: box.color || "#00d8ff",
+              fillColor: box.fillColor || box.color || "#00d8ff",
+              fillOpacity: 0.18,
+              lineWidth: 1,
+              showMidLine: box.showMidLine !== undefined ? box.showMidLine : true,
+              midLineColor: box.color || "#00d8ff",
+              midLineStyle: "dashed",
+              extendRight: false,
+              text: box.label || "",
+              fontSize: 10,
+              textAlign: "right",
+              textVAlign: "top",
+            } as any,
+            rect.width
+          );
+        }
+      });
+    }
+
     // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044 & DEC-070)
     if (!isDrawingsHidden) {
       drawings.forEach((d) => {
@@ -3888,7 +4129,10 @@ export function TradingViewContainer({
   }, [renderDrawingCanvas]);
 
   useEffect(() => {
-    renderDrawingCanvas();
+    const rafId = requestAnimationFrame(() => {
+      renderDrawingCanvas();
+    });
+    return () => cancelAnimationFrame(rafId);
   }, [renderDrawingCanvas]);
 
   // Keyboard shortcut listener (Delete/Backspace to remove, Enter to finish path, Escape to cancel)
@@ -4012,6 +4256,24 @@ export function TradingViewContainer({
       }, 1400);
     };
 
+    const resetChartView = () => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      chart.priceScale("right").applyOptions({ autoScale: true, invertScale: false });
+      chart.timeScale().resetTimeScale();
+      chart.timeScale().scrollToRealTime();
+      setIsPriceScaleInverted(false);
+      setActiveQuickRange(null);
+      flashToast("Chart view reset");
+    };
+
+    const handleGlobalResetView = (e: Event) => {
+      const detail = (e as CustomEvent<{ paneId?: string }>).detail;
+      if (!detail?.paneId || detail.paneId === paneId) {
+        resetChartView();
+      }
+    };
+
     // Price/time under the cursor, falling back to the latest candle close
     const resolveCursorAnchor = (): { time: number; price: number } | null => {
       const lastBar = barsRef.current[barsRef.current.length - 1];
@@ -4036,12 +4298,7 @@ export function TradingViewContainer({
 
       switch (action) {
         case "reset_view": {
-          if (!chart) return;
-          chart.priceScale("right").applyOptions({ autoScale: true });
-          chart.timeScale().resetTimeScale();
-          chart.timeScale().scrollToRealTime();
-          setActiveQuickRange(null);
-          flashToast("Chart view reset");
+          resetChartView();
           return;
         }
         case "invert_scale": {
@@ -4118,7 +4375,11 @@ export function TradingViewContainer({
     };
 
     window.addEventListener("keydown", handleShortcut);
-    return () => window.removeEventListener("keydown", handleShortcut);
+    window.addEventListener("mochex:reset-view", handleGlobalResetView);
+    return () => {
+      window.removeEventListener("keydown", handleShortcut);
+      window.removeEventListener("mochex:reset-view", handleGlobalResetView);
+    };
   }, [
     isActivePane,
     selectedDrawingId,
@@ -4128,6 +4389,47 @@ export function TradingViewContainer({
     coordinateToPrice,
     coordinateToTime,
   ]);
+
+  // Container mouse move handler to detect drawing hover when canvas pointer-events are disabled (DEC-087)
+  const handleContainerMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!drawingCanvasRef.current || isDrawingsHidden || drawingsRef.current.length === 0) {
+        return;
+      }
+      if (
+        isDrawingMode ||
+        draggedHandleRef.current ||
+        selectedDrawingId !== null ||
+        drawingStep === 1 ||
+        inFlightDrawing !== null ||
+        inFlightPathPoints.length > 0 ||
+        inFlightTrendFibPoints.length > 0
+      ) {
+        return;
+      }
+
+      const rect = drawingCanvasRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const hit = getHitTestResult(x, y);
+      const isHit = hit !== null;
+      const nextHandle = hit ? hit.handle : null;
+
+      setIsHoveringDrawing((prev) => (prev === isHit ? prev : isHit));
+      setHoveredHandle((prev) => (prev === nextHandle ? prev : nextHandle));
+    },
+    [
+      isDrawingsHidden,
+      isDrawingMode,
+      selectedDrawingId,
+      drawingStep,
+      inFlightDrawing,
+      inFlightPathPoints,
+      inFlightTrendFibPoints,
+      getHitTestResult,
+    ]
+  );
 
   // Mouse handlers for drawing overlay (DEC-042 to DEC-056)
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -4467,14 +4769,25 @@ export function TradingViewContainer({
         25
       );
       if (snap) {
-        setSnappedPoint(snap);
+        setSnappedPoint((prev) => {
+          if (
+            prev &&
+            prev.time === snap.time &&
+            prev.price === snap.price &&
+            Math.abs(prev.x - snap.x) < 0.5 &&
+            Math.abs(prev.y - snap.y) < 0.5
+          ) {
+            return prev;
+          }
+          return snap;
+        });
         effectiveTime = snap.time;
         effectivePrice = snap.price;
       } else {
-        setSnappedPoint(null);
+        setSnappedPoint((prev) => (prev === null ? prev : null));
       }
     } else {
-      setSnappedPoint(null);
+      setSnappedPoint((prev) => (prev === null ? prev : null));
     }
 
     if (
@@ -4482,7 +4795,10 @@ export function TradingViewContainer({
       activeDrawingTool === "trend_fib" ||
       replayState === "SELECTING"
     ) {
-      setMousePos({ x, y });
+      setMousePos((prev) => {
+        if (prev && Math.abs(prev.x - x) < 0.5 && Math.abs(prev.y - y) < 0.5) return prev;
+        return { x, y };
+      });
     }
 
     // Brush freehand streaming (DEC-063)
@@ -4498,17 +4814,19 @@ export function TradingViewContainer({
       return;
     }
 
-    if (draggedHandle && selectedDrawingId && dragStartPos) {
-      const drawing = drawings.find((d) => d.id === selectedDrawingId);
+    const activeHandle = draggedHandle || draggedHandleRef.current;
+    if (activeHandle && selectedDrawingId && dragStartPos) {
+      const currentDrawings = drawingsRef.current.length > 0 ? drawingsRef.current : drawings;
+      const drawing = currentDrawings.find((d) => d.id === selectedDrawingId);
       if (drawing && !drawing.isLocked && !isDrawingsLocked) {
         // 1. Node handles for path or trend_fib
-        if (draggedHandle.startsWith("node_")) {
-          const nodeIdx = parseInt(draggedHandle.replace("node_", ""), 10);
+        if (activeHandle.startsWith("node_")) {
+          const nodeIdx = parseInt(activeHandle.replace("node_", ""), 10);
           if (drawing.points && !isNaN(nodeIdx) && drawing.points[nodeIdx]) {
             const updatedPoints = [...drawing.points];
             updatedPoints[nodeIdx] = { time: effectiveTime, price: effectivePrice };
             saveDrawings(
-              drawings.map((d) =>
+              currentDrawings.map((d) =>
                 d.id === selectedDrawingId
                   ? {
                       ...d,
@@ -4526,8 +4844,8 @@ export function TradingViewContainer({
         }
 
         // 2. Rectangle 8 handles (DEC-052, DEC-062)
-        if (draggedHandle.startsWith("rect_")) {
-          const hType = draggedHandle.replace("rect_", "");
+        if (activeHandle.startsWith("rect_")) {
+          const hType = activeHandle.replace("rect_", "");
           let sT = drawing.startTime;
           let eT = drawing.endTime;
           let sP = drawing.startPrice;
@@ -4559,7 +4877,7 @@ export function TradingViewContainer({
           }
 
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, startTime: sT, endTime: eT, startPrice: sP, endPrice: eP }
                 : d
@@ -4569,9 +4887,9 @@ export function TradingViewContainer({
         }
 
         // 3. Long / Short Position handles (DEC-054, DEC-065)
-        if (draggedHandle === "pos_target") {
+        if (activeHandle === "pos_target") {
           saveDrawings(
-            drawings.map((d) => {
+            currentDrawings.map((d) => {
               if (d.id !== selectedDrawingId) return d;
               const isLong = d.type === "long_position";
               const clampedTarget = isLong
@@ -4582,9 +4900,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "pos_stop") {
+        if (activeHandle === "pos_stop") {
           saveDrawings(
-            drawings.map((d) => {
+            currentDrawings.map((d) => {
               if (d.id !== selectedDrawingId) return d;
               const isLong = d.type === "long_position";
               const clampedStop = isLong
@@ -4595,9 +4913,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "pos_entry") {
+        if (activeHandle === "pos_entry") {
           saveDrawings(
-            drawings.map((d) => {
+            currentDrawings.map((d) => {
               if (d.id !== selectedDrawingId) return d;
               const isLong = d.type === "long_position";
               const curTarget =
@@ -4623,9 +4941,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "pos_width") {
+        if (activeHandle === "pos_width") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, endTime: effectiveTime }
                 : d
@@ -4635,11 +4953,11 @@ export function TradingViewContainer({
         }
 
         // 4. Circle handles
-        if (draggedHandle === "circle_center") {
+        if (activeHandle === "circle_center") {
           const dt = effectiveTime - drawing.startTime;
           const dp = effectivePrice - drawing.startPrice;
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? {
                     ...d,
@@ -4653,9 +4971,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "circle_radius") {
+        if (activeHandle === "circle_radius") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, endTime: effectiveTime, endPrice: effectivePrice }
                 : d
@@ -4665,17 +4983,17 @@ export function TradingViewContainer({
         }
 
         // 5. Date Range handles
-        if (draggedHandle === "dr_start") {
+        if (activeHandle === "dr_start") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId ? { ...d, startTime: effectiveTime } : d
             )
           );
           return;
         }
-        if (draggedHandle === "dr_end") {
+        if (activeHandle === "dr_end") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId ? { ...d, endTime: effectiveTime } : d
             )
           );
@@ -4683,9 +5001,9 @@ export function TradingViewContainer({
         }
 
         // 6. Horizontal & Vertical Line handles
-        if (draggedHandle === "h_center") {
+        if (activeHandle === "h_center") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, startPrice: effectivePrice, endPrice: effectivePrice }
                 : d
@@ -4693,9 +5011,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "v_center") {
+        if (activeHandle === "v_center") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, startTime: effectiveTime, endTime: effectiveTime }
                 : d
@@ -4705,9 +5023,9 @@ export function TradingViewContainer({
         }
 
         // 7. Standard start & end handles
-        if (draggedHandle === "start") {
+        if (activeHandle === "start") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, startTime: effectiveTime, startPrice: effectivePrice }
                 : d
@@ -4715,9 +5033,9 @@ export function TradingViewContainer({
           );
           return;
         }
-        if (draggedHandle === "end") {
+        if (activeHandle === "end") {
           saveDrawings(
-            drawings.map((d) =>
+            currentDrawings.map((d) =>
               d.id === selectedDrawingId
                 ? { ...d, endTime: effectiveTime, endPrice: effectivePrice }
                 : d
@@ -4726,8 +5044,30 @@ export function TradingViewContainer({
           return;
         }
 
+        // 7.5 Gann Box corner handles (DEC-087)
+        if (activeHandle === "gann_bl") {
+          saveDrawings(
+            currentDrawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, startTime: effectiveTime, endPrice: effectivePrice }
+                : d
+            )
+          );
+          return;
+        }
+        if (activeHandle === "gann_tr") {
+          saveDrawings(
+            currentDrawings.map((d) =>
+              d.id === selectedDrawingId
+                ? { ...d, endTime: effectiveTime, startPrice: effectivePrice }
+                : d
+            )
+          );
+          return;
+        }
+
         // 8. Body translation
-        if (draggedHandle === "body") {
+        if (activeHandle === "body") {
           const deltaPrice =
             effectivePrice - (coordinateToPrice(dragStartPos.y) || dragStartPos.startPrice);
           const startCoordTime = coordinateToTime(dragStartPos.x) || dragStartPos.startTime;
@@ -4739,7 +5079,7 @@ export function TradingViewContainer({
               price: pt.price + deltaPrice,
             }));
             saveDrawings(
-              drawings.map((d) =>
+              currentDrawings.map((d) =>
                 d.id === selectedDrawingId
                   ? {
                       ...d,
@@ -4754,7 +5094,7 @@ export function TradingViewContainer({
             );
           } else {
             saveDrawings(
-              drawings.map((d) =>
+              currentDrawings.map((d) =>
                 d.id === selectedDrawingId
                   ? {
                       ...d,
@@ -4782,8 +5122,10 @@ export function TradingViewContainer({
     }
 
     const hit = getHitTestResult(x, y);
-    setIsHoveringDrawing(hit !== null);
-    setHoveredHandle(hit ? hit.handle : null);
+    const isHit = hit !== null;
+    const nextHandle = hit ? hit.handle : null;
+    setIsHoveringDrawing((prev) => (prev === isHit ? prev : isHit));
+    setHoveredHandle((prev) => (prev === nextHandle ? prev : nextHandle));
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -4857,7 +5199,7 @@ export function TradingViewContainer({
       }
     }
 
-    if (draggedHandle) {
+    if (draggedHandle || draggedHandleRef.current) {
       if (preDragDrawingsRef.current !== null) {
         commitHistoryBaseline(preDragDrawingsRef.current, drawingsRef.current);
         preDragDrawingsRef.current = null;
@@ -4912,6 +5254,8 @@ export function TradingViewContainer({
   const closes = bars.map((b) => b.close);
   const ema20Vals = closes.length >= 20 ? ta.ema(closes, 20) : [];
   const ema50Vals = closes.length >= 50 ? ta.ema(closes, 50) : [];
+  const ema100Vals = closes.length >= 100 ? ta.ema(closes, 100) : [];
+  const ema200Vals = closes.length >= 200 ? ta.ema(closes, 200) : [];
   const bbVals = closes.length >= 20 ? ta.bollingerbands(closes, 20, 2) : [];
   const rsiVals = closes.length >= rsiPeriod + 1 ? ta.rsi(closes, rsiPeriod) : [];
   const macdResults =
@@ -4921,6 +5265,8 @@ export function TradingViewContainer({
 
   const latestEma20 = ema20Vals.length > 0 ? ema20Vals[ema20Vals.length - 1] : null;
   const latestEma50 = ema50Vals.length > 0 ? ema50Vals[ema50Vals.length - 1] : null;
+  const latestEma100 = ema100Vals.length > 0 ? ema100Vals[ema100Vals.length - 1] : null;
+  const latestEma200 = ema200Vals.length > 0 ? ema200Vals[ema200Vals.length - 1] : null;
   const latestBb = bbVals.length > 0 ? bbVals[bbVals.length - 1] : null;
   const latestRsi = rsiVals.length > 0 ? rsiVals[rsiVals.length - 1] : null;
   const latestMacdObj = macdResults.length > 0 ? macdResults[macdResults.length - 1] : null;
@@ -4936,6 +5282,8 @@ export function TradingViewContainer({
 
   const displayEma20 = hoveredStats?.ema20 ?? latestEma20;
   const displayEma50 = hoveredStats?.ema50 ?? latestEma50;
+  const displayEma100 = hoveredStats?.ema100 ?? latestEma100;
+  const displayEma200 = hoveredStats?.ema200 ?? latestEma200;
   const displayBbUpper = hoveredStats?.bbUpper ?? latestBb?.upper;
   const displayBbMiddle = hoveredStats?.bbMiddle ?? latestBb?.middle;
   const displayBbLower = hoveredStats?.bbLower ?? latestBb?.lower;
@@ -4973,8 +5321,19 @@ export function TradingViewContainer({
     ? calculateVisibleVolumeProfile(bars, vpvrRows, vpvrVaPercent / 100)
     : null;
 
+  const hasFvgIndicator =
+    activeIndicators.includes("Unmitigated Multi-Timeframe FVG (0% Hit)") ||
+    activeIndicators.some((ind) => ind.toLowerCase().includes("fvg"));
+
+  const activeFvgZones = useMemo(() => {
+    if (!hasFvgIndicator) return [];
+    return computeUnmitigatedFvgs(bars, { timeframe: resolution });
+  }, [hasFvgIndicator, bars, resolution]);
+
+  const bullFvgCount = activeFvgZones.filter((z) => z.type === "BULLISH").length;
+  const bearFvgCount = activeFvgZones.filter((z) => z.type === "BEARISH").length;
+
   // Drawing overlay interaction state (DEC-042, DEC-043 & DEC-073)
-  const isDrawingMode = activeDrawingTool !== "none" && activeDrawingTool !== "crosshair";
   const isInteracting =
     replayState === "SELECTING" ||
     isDrawingMode ||
@@ -5080,8 +5439,8 @@ export function TradingViewContainer({
           <div className="hidden lg:flex items-center gap-3 pl-3 border-l border-border shrink-0">
             {hasRibbonOrEma && (
               <>
-                <div className="flex items-center gap-1.5 text-gold">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gold" />
+                <div className="flex items-center gap-1.5 text-white">
+                  <span className="w-1.5 h-1.5 rounded-full bg-white" />
                   <span>EMA 20</span>
                   <span className="text-on-surface">
                     {displayEma20 !== null && displayEma20 !== undefined
@@ -5090,12 +5449,32 @@ export function TradingViewContainer({
                   </span>
                 </div>
 
-                <div className="flex items-center gap-1.5 text-cyan">
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan" />
+                <div className="flex items-center gap-1.5 text-[#2962ff]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff]" />
                   <span>EMA 50</span>
                   <span className="text-on-surface">
                     {displayEma50 !== null && displayEma50 !== undefined
                       ? displayEma50.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[#f5ac37]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#f5ac37]" />
+                  <span>EMA 100</span>
+                  <span className="text-on-surface">
+                    {displayEma100 !== null && displayEma100 !== undefined
+                      ? displayEma100.toFixed(2)
+                      : "—"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-[#ff7043]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#ff7043]" />
+                  <span>EMA 200</span>
+                  <span className="text-on-surface">
+                    {displayEma200 !== null && displayEma200 !== undefined
+                      ? displayEma200.toFixed(2)
                       : "—"}
                   </span>
                 </div>
@@ -5146,6 +5525,32 @@ export function TradingViewContainer({
                   : "—"}
               </span>
             </div>
+
+            {customIndicatorData && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-primary-container/15 text-primary border border-primary/30">
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                <span className="font-semibold">{customIndicatorData.name}</span>
+                {onClearCustomIndicator && (
+                  <button
+                    onClick={onClearCustomIndicator}
+                    title="Remove custom indicator from chart"
+                    className="text-muted hover:text-tertiary ml-0.5 cursor-pointer"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {hasFvgIndicator && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container border border-outline-variant/30 text-[10px] font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00c087] animate-pulse" />
+                <span className="font-semibold text-on-surface">FVG 0% Hit:</span>
+                <span className="text-[#00c087] font-bold">{bullFvgCount} Bull</span>
+                <span>·</span>
+                <span className="text-[#ff3b30] font-bold">{bearFvgCount} Bear</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -5229,17 +5634,6 @@ export function TradingViewContainer({
       {/* Main Chart Workspace Area */}
       <div
         className="flex-1 relative w-full h-full"
-        onMouseMove={(e) => {
-          if (activeDrawingTool !== "none" && activeDrawingTool !== "crosshair") return;
-          if (isDrawing || drawingStep === 1 || draggedHandle) return;
-          const rect = drawingCanvasRef.current?.getBoundingClientRect();
-          if (!rect) return;
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
-          const hit = getHitTestResult(x, y);
-          setIsHoveringDrawing(hit !== null);
-          setHoveredHandle(hit ? hit.handle : null);
-        }}
       >
         {hasLibrary ? (
           <div id="tv_chart_container" className="w-full h-full" />
@@ -5249,6 +5643,7 @@ export function TradingViewContainer({
             data-chart-container="true"
             data-active-pane={isActivePane ? "true" : "false"}
             className="w-full h-full relative"
+            onMouseMove={handleContainerMouseMove}
           >
             {/* Lightweight Charts DOM Mount Container */}
             <div
@@ -5268,8 +5663,9 @@ export function TradingViewContainer({
                 setIsHoveringDrawing(false);
                 setHoveredHandle(null);
                 setMousePos(null);
-                if (draggedHandle) {
+                if (draggedHandle || draggedHandleRef.current) {
                   setDraggedHandle(null);
+                  draggedHandleRef.current = null;
                   setDragStartPos(null);
                 }
                 renderDrawingCanvas();
