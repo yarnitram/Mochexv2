@@ -679,10 +679,14 @@ export function RightSidebar({
     fetchCloudWatchlists();
   }, [fetchCloudWatchlists]);
 
-  // WebSocket Live Price updates
+  // WebSocket Live Price updates + Resilient Polling Fallback (DEC-093)
   useEffect(() => {
+    let isCancelled = false;
+    const lastMiniTickerTickRef = { current: 0 };
+
     mexcWsManager.connect();
     const handleTickers = (items: MexcMiniTickerItem[]) => {
+      lastMiniTickerTickRef.current = Date.now();
       setTickers((prev) => {
         const next = { ...prev };
         for (const item of items) {
@@ -706,7 +710,47 @@ export function RightSidebar({
     };
 
     mexcWsManager.subscribeMiniTickers(handleTickers);
+
+    // Watchlist REST Polling Fallback (every 4s if WS silent >5s)
+    const pollInterval = setInterval(async () => {
+      if (isCancelled) return;
+      if (Date.now() - lastMiniTickerTickRef.current < 5000) {
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/mexc/ticker");
+        if (res.ok && !isCancelled) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            setTickers((prev) => {
+              const next = { ...prev };
+              for (const item of data) {
+                if (next[item.symbol]) {
+                  const p = parseFloat(item.lastPrice);
+                  if (p > 0) {
+                    processSymbolPriceTick(item.symbol, p);
+                  }
+                  next[item.symbol] = {
+                    ...next[item.symbol],
+                    price: p || next[item.symbol].price,
+                    change: parseFloat(item.priceChangePercent) * 100 || next[item.symbol].change,
+                    high: parseFloat(item.highPrice) || next[item.symbol].high,
+                    low: parseFloat(item.lowPrice) || next[item.symbol].low,
+                    volume: parseFloat(item.volume) || next[item.symbol].volume,
+                  };
+                }
+              }
+              return next;
+            });
+          }
+        }
+      } catch {}
+    }, 4000);
+
     return () => {
+      isCancelled = true;
+      clearInterval(pollInterval);
       mexcWsManager.unsubscribeMiniTickers(handleTickers);
     };
   }, [processSymbolPriceTick]);

@@ -85,30 +85,34 @@ export class MexcClient {
     if (computedStartTime !== undefined) queryParams.set("startTime", computedStartTime.toString());
     if (endTime !== undefined) queryParams.set("endTime", endTime.toString());
 
-    if (!forceProxy && typeof window !== "undefined") {
-      try {
-        const directUrl = `${this.apiBase}/api/v3/klines?${queryParams.toString()}`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-
-        const response = await fetch(directUrl, {
-          method: "GET",
-          signal: controller.signal,
-          headers: { Accept: "application/json" },
-        });
-
-        clearTimeout(timeoutId);
-
-        if (response.ok) {
-          const rawKlines = (await response.json()) as MexcRawKline[];
-          return this.transformKlines(rawKlines);
-        }
-      } catch (_err) {
-        // Direct fetch failed (CORS or network error). Fall through to fallback proxy.
-      }
+    // In the browser, ALWAYS use the internal Next.js proxy route (/api/mexc/klines)
+    // because MEXC public REST endpoints do not permit cross-origin (CORS) browser requests.
+    if (typeof window !== "undefined" || forceProxy) {
+      return this.fetchFromProxy(queryParams);
     }
 
-    // Fallback: Internal Next.js proxy route
+    // Direct server-side fetch (Node.js runtime / SSR / testing environments without CORS)
+    try {
+      const directUrl = `${this.apiBase}/api/v3/klines?${queryParams.toString()}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+      const response = await fetch(directUrl, {
+        method: "GET",
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const rawKlines = (await response.json()) as MexcRawKline[];
+        return this.transformKlines(rawKlines);
+      }
+    } catch (_err) {
+      // Direct server fetch failed. Fall through to fallback proxy.
+    }
+
     return this.fetchFromProxy(queryParams);
   }
 

@@ -262,6 +262,8 @@ export function TradingViewContainer({
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [hoveredStats, setHoveredStats] = useState<HoveredStats | null>(null);
   const [replayState, setReplayState] = useState<ReplayState>("IDLE");
+  const [feedMode, setFeedMode] = useState<"ws" | "polling">("polling");
+  const lastWsTickTimeRef = useRef<number>(0);
 
   // Geometric drawing tools state (DEC-040 to DEC-049)
   const [drawings, setDrawings] = useState<ChartDrawing[]>([]);
@@ -897,10 +899,8 @@ export function TradingViewContainer({
 
     loadData();
 
-    // Subscribe to live WebSocket updates
-    mexcWsManager.connect();
-    const intervalStr = mexcClient.toMexcInterval(resolution);
-    const channel = mexcWsManager.subscribeKline(symbol, intervalStr, (newBar) => {
+    // Extracted Live Candle & Indicator Tick Pipeline (DEC-093)
+    const applyLiveBarUpdate = (newBar: CandlestickBar) => {
       if (replayEngine.getState() !== "IDLE") return; // Replay overrides live feed
 
       setCurrentPrice(newBar.close);
@@ -1021,8 +1021,56 @@ export function TradingViewContainer({
             });
           }
         }
+
+        // Keep parent price telemetry updated with latest window stats
+        const firstBar = updated[Math.max(0, updated.length - 96)];
+        const change =
+          firstBar.open > 0 ? ((newBar.close - firstBar.open) / firstBar.open) * 100 : 0;
+        const recentWindow = updated.slice(-96);
+        const high = Math.max(...recentWindow.map((b) => b.high));
+        const low = Math.min(...recentWindow.map((b) => b.low));
+        const volume = recentWindow.reduce((acc, b) => acc + b.volume, 0);
+
+        onPriceUpdateRef.current?.({
+          price: newBar.close,
+          change,
+          high,
+          low,
+          volume,
+        });
       }
+    };
+
+    // 1. Subscribe to live WebSocket updates (Fast-path sub-second stream)
+    mexcWsManager.connect();
+    const intervalStr = mexcClient.toMexcInterval(resolution);
+    const channel = mexcWsManager.subscribeKline(symbol, intervalStr, (newBar) => {
+      lastWsTickTimeRef.current = Date.now();
+      setFeedMode("ws");
+      applyLiveBarUpdate(newBar);
     });
+
+    // 2. Resilient REST Polling Fallback (DEC-093)
+    // Ticks every 2.5s; executes whenever WebSocket is blocked, disconnected, or silent >4s.
+    const pollIntervalId = setInterval(async () => {
+      if (isCancelled || replayEngine.getState() !== "IDLE") return;
+      if (Date.now() - lastWsTickTimeRef.current < 4000) {
+        return;
+      }
+      setFeedMode("polling");
+
+      try {
+        const latestBars = await mexcClient.getKlines({
+          symbol,
+          resolution,
+          limit: 2,
+        });
+        if (!isCancelled && latestBars && latestBars.length > 0) {
+          const latestBar = latestBars[latestBars.length - 1];
+          applyLiveBarUpdate(latestBar);
+        }
+      } catch {}
+    }, 2500);
 
     // Replay Engine Listener (DEC-073)
     const applyBarsToChartSeries = (targetBars: CandlestickBar[]) => {
@@ -1115,6 +1163,7 @@ export function TradingViewContainer({
 
     return () => {
       isCancelled = true;
+      clearInterval(pollIntervalId);
       mexcWsManager.unsubscribeKline(channel);
       unsubscribeReplay();
     };
@@ -5625,9 +5674,16 @@ export function TradingViewContainer({
             </button>
           )}
 
-          <div className="flex items-center gap-1.5">
-            <Activity size={12} className="text-secondary animate-pulse" />
-            <span className="hidden sm:inline">MEXC V3 WebSocket Live</span>
+          <div className="flex items-center gap-1.5 text-[11px] font-mono">
+            <Activity
+              size={12}
+              className={`${
+                feedMode === "ws" ? "text-secondary" : "text-primary"
+              } animate-pulse`}
+            />
+            <span className="hidden sm:inline">
+              {feedMode === "ws" ? "MEXC V3 WebSocket Live" : "MEXC Live (2.5s Polling)"}
+            </span>
           </div>
 
           <div className="flex items-center gap-1 text-primary bg-primary/10 px-1.5 py-0.5 rounded border border-primary/20">
