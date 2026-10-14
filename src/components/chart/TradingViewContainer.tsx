@@ -7,7 +7,7 @@ import { mexcWsManager } from "@/lib/mexc/websocket";
 import { replayEngine, ReplayState } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play, RefreshCw } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play, RefreshCw, RotateCcw } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
 import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
@@ -4245,34 +4245,40 @@ export function TradingViewContainer({
     isActivePane,
   ]);
 
-  // TradingView Alt-Shortcut Suite (DEC-077) — focused pane only, ignored while typing
+  const flashToast = useCallback((message: string) => {
+    setShortcutToast(message);
+    window.setTimeout(() => {
+      setShortcutToast((current) => (current === message ? null : current));
+    }, 1400);
+  }, []);
+
+  const resetChartView = useCallback(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.priceScale("right").applyOptions({ autoScale: true, invertScale: false });
+    chart.timeScale().resetTimeScale();
+    chart.timeScale().scrollToRealTime();
+    setIsPriceScaleInverted(false);
+    setActiveQuickRange(null);
+    flashToast("Chart view reset");
+  }, [flashToast]);
+
+  // TradingView Alt-Shortcut Suite (DEC-077) & Alternative Shortcuts (DEC-091)
   useEffect(() => {
-    if (!isActivePane) return;
-
-    const flashToast = (message: string) => {
-      setShortcutToast(message);
-      window.setTimeout(() => {
-        setShortcutToast((current) => (current === message ? null : current));
-      }, 1400);
-    };
-
-    const resetChartView = () => {
-      const chart = chartRef.current;
-      if (!chart) return;
-      chart.priceScale("right").applyOptions({ autoScale: true, invertScale: false });
-      chart.timeScale().resetTimeScale();
-      chart.timeScale().scrollToRealTime();
-      setIsPriceScaleInverted(false);
-      setActiveQuickRange(null);
-      flashToast("Chart view reset");
-    };
-
     const handleGlobalResetView = (e: Event) => {
       const detail = (e as CustomEvent<{ paneId?: string }>).detail;
       if (!detail?.paneId || detail.paneId === paneId) {
         resetChartView();
       }
     };
+
+    window.addEventListener("mochex:reset-view", handleGlobalResetView);
+
+    if (!isActivePane) {
+      return () => {
+        window.removeEventListener("mochex:reset-view", handleGlobalResetView);
+      };
+    }
 
     // Price/time under the cursor, falling back to the latest candle close
     const resolveCursorAnchor = (): { time: number; price: number } | null => {
@@ -6338,18 +6344,14 @@ export function TradingViewContainer({
                 </button>
               )}
 
-              {/* Reset Chart View / Scroll to Latest (Alt+R) */}
+              {/* Reset Chart View Button with RotateCcw Icon (DEC-091) */}
               <button
-                onClick={() => {
-                  setActiveQuickRange(null);
-                  chartRef.current?.priceScale("right").applyOptions({ autoScale: true });
-                  chartRef.current?.timeScale().resetTimeScale();
-                  chartRef.current?.timeScale().scrollToRealTime();
-                }}
-                title="Reset Chart View & Jump to Latest (Alt+R)"
-                className="px-1.5 py-0.5 rounded text-muted hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
+                onClick={resetChartView}
+                title="Reset Chart View & Jump to Latest (Alt+R / Ctrl+Alt+R / R)"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-surface-container-low hover:bg-primary/20 border border-outline-variant/40 hover:border-primary/50 text-on-surface hover:text-white transition-colors cursor-pointer font-medium text-[11px]"
               >
-                Reset &rarr;
+                <RotateCcw size={10} className="text-primary" />
+                <span>Reset View</span>
               </button>
 
               {isPriceScaleInverted && (
@@ -6364,6 +6366,18 @@ export function TradingViewContainer({
                   INV
                 </button>
               )}
+            </div>
+
+            {/* TradingView-Style Price Scale Auto / Reset Button (DEC-091) */}
+            <div className="absolute bottom-8 right-14 z-20 flex items-center">
+              <button
+                onClick={resetChartView}
+                title="Auto Scale & Reset Chart View (Alt+R / Ctrl+Alt+R / R)"
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface-container-lowest/90 hover:bg-primary/20 border border-border/80 hover:border-primary/50 text-[10px] font-mono text-muted hover:text-white transition-colors cursor-pointer shadow-xs backdrop-blur-xs"
+              >
+                <RotateCcw size={10} className="text-primary" />
+                <span className="font-semibold">Auto</span>
+              </button>
             </div>
 
             {/* Transient Keyboard Shortcut Feedback Toast (DEC-077) */}

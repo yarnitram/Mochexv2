@@ -231,7 +231,12 @@ export default function WorkstationPage() {
         });
         return;
       }
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === "KeyR" || e.key?.toLowerCase() === "r")) {
+      const isKeyR = e.code === "KeyR" || e.key?.toLowerCase() === "r";
+      const isResetShortcut =
+        (isKeyR && (e.altKey || (!e.ctrlKey && !e.metaKey && !e.shiftKey))) ||
+        (e.altKey && (e.code === "Digit0" || e.key === "0"));
+
+      if (isResetShortcut) {
         e.preventDefault();
         window.dispatchEvent(
           new CustomEvent("mochex:reset-view", {

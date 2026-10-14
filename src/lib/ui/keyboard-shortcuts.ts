@@ -56,6 +56,7 @@ export function matchChartShortcut(e: ShortcutKeyInput): ChartShortcutAction | n
   if (e.ctrlKey || e.metaKey) return null;
 
   if (e.altKey && !e.shiftKey) {
+    if (e.code === "Digit0" || e.key === "0") return "reset_view";
     const fromCode = ALT_CODE_MAP[e.code];
     if (fromCode) return fromCode;
     if (e.key) {
@@ -89,7 +90,7 @@ export function isTypingTarget(el: Element | null): boolean {
 
 /** Full cheatsheet listing (chart actions + existing workstation shortcuts). */
 export const SHORTCUT_CHEATSHEET: ShortcutDefinition[] = [
-  { action: "reset_view", keys: "Alt + R", label: "Reset chart view (auto-scale + jump to latest)", category: "Chart" },
+  { action: "reset_view", keys: "Alt + R / Ctrl+Alt+R / R", label: "Reset chart view (auto-scale + jump to latest)", category: "Chart" },
   { action: "invert_scale", keys: "Alt + I", label: "Invert price scale", category: "Chart" },
   { action: "horizontal_line", keys: "Alt + H", label: "Drop horizontal line at cursor price", category: "Drawing" },
   { action: "trendline", keys: "Alt + T", label: "Activate Trendline tool", category: "Drawing" },

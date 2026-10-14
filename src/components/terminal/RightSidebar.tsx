@@ -37,6 +37,19 @@ import { OrderDepthLadder } from "./OrderDepthLadder";
 import { DepthOfMarketTape } from "./DepthOfMarketTape";
 import { AddPairModal } from "../watchlist/AddPairModal";
 import { AuthUser } from "@/lib/auth/use-auth";
+import {
+  WatchlistProfile,
+  DEFAULT_WATCHLIST_PROFILES,
+  loadWatchlistProfiles,
+  saveWatchlistProfiles,
+  loadActiveProfileId,
+  saveActiveProfileId,
+  createWatchlistProfile,
+  renameWatchlistProfile,
+  deleteWatchlistProfile,
+  addSymbolToProfile,
+  removeSymbolFromProfile,
+} from "@/lib/watchlist/watchlist-profiles";
 import { ChartDrawing, formatDrawingObjectLabel } from "@/lib/chart/drawing-math";
 import {
   PriceAlert,
@@ -196,24 +209,22 @@ export function RightSidebar({
   const [editingDrawingId, setEditingDrawingId] = useState<string | null>(null);
   const [editingNameValue, setEditingNameValue] = useState<string>("");
 
-  // Named Watchlists state
-  const [activeListName, setActiveListName] = useState("Core Majors");
-  const [availableLists, setAvailableLists] = useState<string[]>([
-    "Core Majors",
-    "Layer 1s",
-    "Meme Coins",
-  ]);
+  // Token Groups / Watchlist Profiles (DEC-091)
+  const [profiles, setProfiles] = useState<WatchlistProfile[]>(() =>
+    loadWatchlistProfiles()
+  );
+  const [activeProfileId, setActiveProfileId] = useState<string>(() =>
+    loadActiveProfileId(DEFAULT_WATCHLIST_PROFILES)
+  );
+  const [isCreatingProfile, setIsCreatingProfile] = useState(false);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [editingProfileName, setEditingProfileName] = useState("");
 
-  const [activeSymbols, setActiveSymbols] = useState<string[]>([
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "MXUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "BNBUSDT",
-    "SUIUSDT",
-  ]);
+  const activeProfile =
+    profiles.find((p) => p.id === activeProfileId) || profiles[0] || DEFAULT_WATCHLIST_PROFILES[0];
+  const activeSymbols = activeProfile.symbols;
+  const activeListName = activeProfile.name;
 
   const [tickers, setTickers] = useState<Record<string, TickerRow>>(() => {
     const map: Record<string, TickerRow> = {};
@@ -640,7 +651,7 @@ export function RightSidebar({
     return () => clearTimeout(timer);
   }, [activeToast]);
 
-  // Sync cloud watchlists
+  // Sync cloud watchlists into profiles
   const fetchCloudWatchlists = useCallback(async () => {
     if (!user) return;
     try {
@@ -648,13 +659,15 @@ export function RightSidebar({
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
-          const names = data.map((d: any) => d.name);
-          setAvailableLists(names);
-          const first = data[0];
-          setActiveListName(first.name);
-          if (Array.isArray(first.symbols)) {
-            setActiveSymbols(first.symbols);
-          }
+          const cloudProfiles: WatchlistProfile[] = data.map((d: any) => ({
+            id: d.id || `profile_${d.name.toLowerCase().replace(/\s+/g, "-")}`,
+            name: d.name,
+            symbols: Array.isArray(d.symbols) ? d.symbols : [],
+            isCustom: true,
+          }));
+          setProfiles(cloudProfiles);
+          saveWatchlistProfiles(cloudProfiles);
+          setActiveProfileId(cloudProfiles[0].id);
         }
       }
     } catch {}
@@ -698,8 +711,8 @@ export function RightSidebar({
 
   const handleAddSymbol = async (sym: string) => {
     if (activeSymbols.includes(sym)) return;
-    const nextSymbols = [...activeSymbols, sym];
-    setActiveSymbols(nextSymbols);
+    const nextProfiles = addSymbolToProfile(profiles, activeProfile.id, sym);
+    setProfiles(nextProfiles);
 
     // Seed ticker row if not present
     if (!tickers[sym]) {
@@ -723,24 +736,54 @@ export function RightSidebar({
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({
-            name: activeListName,
-            symbols: nextSymbols,
+            name: activeProfile.name,
+            symbols: [...activeProfile.symbols, sym],
             isDefault: true,
           }),
         });
       } catch {}
-    } else if (typeof window !== "undefined") {
-      localStorage.setItem("mochex:watchlist_symbols", JSON.stringify(nextSymbols));
     }
   };
 
   const handleRemoveSymbol = (sym: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const nextSymbols = activeSymbols.filter((s) => s !== sym);
-    setActiveSymbols(nextSymbols);
-    if (!user && typeof window !== "undefined") {
-      localStorage.setItem("mochex:watchlist_symbols", JSON.stringify(nextSymbols));
-    }
+    const nextProfiles = removeSymbolFromProfile(profiles, activeProfile.id, sym);
+    setProfiles(nextProfiles);
+  };
+
+  const handleSelectProfile = (profileId: string) => {
+    setActiveProfileId(profileId);
+    saveActiveProfileId(profileId);
+    setIsListDropdownOpen(false);
+  };
+
+  const handleCreateProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProfileName.trim()) return;
+    const { profiles: nextProfiles, newProfile } = createWatchlistProfile(
+      profiles,
+      newProfileName.trim()
+    );
+    setProfiles(nextProfiles);
+    setActiveProfileId(newProfile.id);
+    setNewProfileName("");
+    setIsCreatingProfile(false);
+    setIsListDropdownOpen(false);
+  };
+
+  const handleRenameProfile = (profileId: string, newName: string) => {
+    if (!newName.trim()) return;
+    const nextProfiles = renameWatchlistProfile(profiles, profileId, newName.trim());
+    setProfiles(nextProfiles);
+    setEditingProfileId(null);
+  };
+
+  const handleDeleteProfile = (profileId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (profiles.length <= 1) return;
+    const { profiles: nextProfiles, activeId } = deleteWatchlistProfile(profiles, profileId);
+    setProfiles(nextProfiles);
+    setActiveProfileId(activeId);
   };
 
   const handleCreateManualAlert = (e: React.FormEvent) => {
@@ -2096,34 +2139,121 @@ export function RightSidebar({
         </div>
       ) : (
         <>
-          {/* Named Watchlist Selector Ribbon */}
+          {/* Named Watchlist Profile Selector Ribbon (DEC-091) */}
           <div className="px-2.5 py-1.5 border-b border-border bg-surface-container-low flex items-center justify-between text-xs font-mono">
             <div className="relative">
               <button
                 onClick={() => setIsListDropdownOpen(!isListDropdownOpen)}
-                className="flex items-center gap-1 text-on-surface hover:text-primary font-semibold transition-colors"
+                className="flex items-center gap-1.5 text-on-surface hover:text-primary font-semibold transition-colors cursor-pointer"
               >
                 <List size={12} className="text-muted" />
                 <span>{activeTab === "hot" ? "24h Volatility Leaders" : activeListName}</span>
                 <ChevronDown size={11} className="text-muted" />
               </button>
 
-              {isListDropdownOpen && (
-                <div className="absolute top-full left-0 mt-1 w-44 bg-surface-container-low border border-border rounded shadow-xl py-1 z-50">
-                  {availableLists.map((name) => (
+              {isListDropdownOpen && activeTab !== "hot" && (
+                <div className="absolute top-full left-0 mt-1 w-56 bg-surface-container-low border border-border rounded-md shadow-2xl py-1 z-50">
+                  <div className="px-2.5 py-1 border-b border-border text-[10px] font-semibold text-muted uppercase tracking-wider flex items-center justify-between">
+                    <span>Token Groups / Profiles</span>
                     <button
-                      key={name}
-                      onClick={() => {
-                        setActiveListName(name);
-                        setIsListDropdownOpen(false);
-                      }}
-                      className={`w-full text-left px-2.5 py-1.5 text-xs hover:bg-surface-container transition-colors ${
-                        name === activeListName ? "text-primary font-bold" : "text-on-surface"
-                      }`}
+                      onClick={() => setIsCreatingProfile(true)}
+                      className="text-primary hover:underline flex items-center gap-0.5 text-[10px] cursor-pointer"
                     >
-                      {name}
+                      <Plus size={10} />
+                      <span>New</span>
                     </button>
-                  ))}
+                  </div>
+
+                  {/* Profile list */}
+                  <div className="max-h-52 overflow-y-auto py-0.5">
+                    {profiles.map((p) => (
+                      <div
+                        key={p.id}
+                        className={`flex items-center justify-between px-2.5 py-1.5 text-xs hover:bg-surface-container transition-colors cursor-pointer group ${
+                          p.id === activeProfileId ? "text-primary font-bold bg-primary/10" : "text-on-surface"
+                        }`}
+                        onClick={() => handleSelectProfile(p.id)}
+                      >
+                        {editingProfileId === p.id ? (
+                          <input
+                            type="text"
+                            value={editingProfileName}
+                            onChange={(e) => setEditingProfileName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") handleRenameProfile(p.id, editingProfileName);
+                              if (e.key === "Escape") setEditingProfileId(null);
+                            }}
+                            onBlur={() => handleRenameProfile(p.id, editingProfileName)}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            className="bg-surface px-1.5 py-0.5 rounded border border-primary text-xs text-on-surface w-32 outline-hidden"
+                          />
+                        ) : (
+                          <div className="flex items-center gap-1.5 truncate">
+                            {p.id === activeProfileId && <Check size={12} className="text-primary shrink-0" />}
+                            <span className="truncate">{p.name}</span>
+                            <span className="text-[10px] text-muted font-normal shrink-0">({p.symbols.length})</span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingProfileId(p.id);
+                              setEditingProfileName(p.name);
+                            }}
+                            title="Rename Profile"
+                            className="p-1 hover:text-primary text-muted rounded cursor-pointer"
+                          >
+                            <Edit3 size={11} />
+                          </button>
+                          {profiles.length > 1 && (
+                            <button
+                              onClick={(e) => handleDeleteProfile(p.id, e)}
+                              title="Delete Profile"
+                              className="p-1 hover:text-tertiary text-muted rounded cursor-pointer"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Inline Create Form */}
+                  {isCreatingProfile && (
+                    <form onSubmit={handleCreateProfile} className="p-2 border-t border-border bg-surface-container-lowest">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          placeholder="Profile name..."
+                          value={newProfileName}
+                          onChange={(e) => setNewProfileName(e.target.value)}
+                          autoFocus
+                          className="flex-1 bg-surface-container-low px-2 py-1 rounded text-xs border border-border text-on-surface outline-hidden"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!newProfileName.trim()}
+                          className="px-2 py-1 rounded bg-primary text-white text-[10px] font-semibold hover:bg-primary-hover disabled:opacity-40 cursor-pointer"
+                        >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsCreatingProfile(false);
+                            setNewProfileName("");
+                          }}
+                          className="p-1 text-muted hover:text-on-surface cursor-pointer"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
               )}
             </div>
