@@ -25,11 +25,14 @@ import {
   Camera,
   LayoutTemplate,
   Star,
+  Search,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
 import { GridLayoutMode, GridSyncConfig } from "@/lib/chart/multi-chart-grid";
 import { IndicatorTemplate, getStoredTemplates } from "@/lib/indicators/templates";
+import { SymbolSearchModal } from "./SymbolSearchModal";
+import { isTypingTarget } from "@/lib/ui/keyboard-shortcuts";
 
 interface TacticalHeaderProps {
   symbol: string;
@@ -111,12 +114,31 @@ export function TacticalHeader({
   isCapturingSnapshot = false,
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
+  const [isSymbolSearchOpen, setIsSymbolSearchOpen] = useState(false);
   const [isGridDropdownOpen, setIsGridDropdownOpen] = useState(false);
   const [isTemplatesDropdownOpen, setIsTemplatesDropdownOpen] = useState(false);
   const [quickTemplates, setQuickTemplates] = useState<IndicatorTemplate[]>([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    const handleGlobalSearchKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target as Element)) return;
+      if (e.key === "/" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")) {
+        e.preventDefault();
+        setIsSymbolSearchOpen((prev) => !prev);
+      }
+    };
+    const handleOpenSearchModal = () => setIsSymbolSearchOpen(true);
+
+    window.addEventListener("keydown", handleGlobalSearchKey);
+    window.addEventListener("mochex:open-symbol-search", handleOpenSearchModal);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalSearchKey);
+      window.removeEventListener("mochex:open-symbol-search", handleOpenSearchModal);
+    };
+  }, []);
 
   useEffect(() => {
     if (isTemplatesDropdownOpen) {
@@ -170,38 +192,16 @@ export function TacticalHeader({
 
         <div className="h-4 w-px bg-border mx-1" />
 
-        {/* Pair Selector Dropdown */}
+        {/* Pair Selector & Symbol Search Modal Trigger (1,480+ MEXC Pairs) */}
         <div className="relative">
           <button
-            onClick={() => setIsSymbolDropdownOpen(!isSymbolDropdownOpen)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container border border-outline-variant/30 text-on-surface text-xs font-mono font-semibold transition-colors"
+            onClick={() => setIsSymbolSearchOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container border border-outline-variant/30 text-on-surface text-xs font-mono font-semibold transition-colors cursor-pointer group"
+            title="Search 1,480+ MEXC Pairs (Ctrl+K or /)"
           >
             <span>{formattedSymbol}</span>
-            <ChevronDown size={13} className="text-muted" />
+            <Search size={11} className="text-muted group-hover:text-primary transition-colors" />
           </button>
-
-          {isSymbolDropdownOpen && (
-            <div className="absolute top-full left-0 mt-1 w-44 bg-surface-container-low border border-border rounded shadow-xl py-1 z-50">
-              <div className="px-2 py-1 text-[10px] font-mono text-muted uppercase">
-                MEXC Spot Markets
-              </div>
-              {POPULAR_PAIRS.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => {
-                    onSelectSymbol(p);
-                    setIsSymbolDropdownOpen(false);
-                  }}
-                  className={`w-full text-left px-2.5 py-1.5 text-xs font-mono flex items-center justify-between hover:bg-surface-container transition-colors ${
-                    p === symbol ? "text-primary-container font-bold" : "text-on-surface"
-                  }`}
-                >
-                  <span>{p.replace("USDT", "/USDT")}</span>
-                  {p === symbol && <Check size={12} />}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
 
         {/* Live Mark Price & 24h PnL Pill */}
@@ -682,6 +682,17 @@ export function TacticalHeader({
           </div>
         </button>
       </div>
+
+      {/* TradingView-Style Symbol Search Modal (1,480+ MEXC Pairs) */}
+      <SymbolSearchModal
+        isOpen={isSymbolSearchOpen}
+        onClose={() => setIsSymbolSearchOpen(false)}
+        selectedSymbol={symbol}
+        onSelectSymbol={(newSym) => {
+          onSelectSymbol(newSym);
+          setIsSymbolSearchOpen(false);
+        }}
+      />
     </header>
   );
 }

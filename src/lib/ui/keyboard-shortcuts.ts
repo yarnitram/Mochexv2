@@ -105,6 +105,7 @@ export const EXISTING_SHORTCUTS: Array<{ keys: string; label: string; category: 
   { keys: "Ctrl + D", label: "Clone selected drawing", category: "Drawing" },
   { keys: "Delete / Backspace", label: "Remove selected drawing", category: "Drawing" },
   { keys: "Esc", label: "Cancel drawing / deselect", category: "Drawing" },
+  { keys: "Ctrl + K / /", label: "Search 1,480+ MEXC Market Symbols", category: "Workspace" },
   { keys: "Alt + Enter", label: "Maximize / restore focused split pane", category: "Workspace" },
   { keys: "Alt + S", label: "Toggle Crypto Technical Screener & Heatmap drawer", category: "Workspace" },
   { keys: "Space", label: "Play / pause Bar Replay", category: "Replay" },
