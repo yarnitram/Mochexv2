@@ -22,10 +22,14 @@ import {
   Keyboard,
   Radar,
   Activity,
+  Camera,
+  LayoutTemplate,
+  Star,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
 import { GridLayoutMode, GridSyncConfig } from "@/lib/chart/multi-chart-grid";
+import { IndicatorTemplate, getStoredTemplates } from "@/lib/indicators/templates";
 
 interface TacticalHeaderProps {
   symbol: string;
@@ -39,7 +43,7 @@ interface TacticalHeaderProps {
   volume24h?: number;
   isReplayActive: boolean;
   onToggleReplay: () => void;
-  onOpenIndicators: () => void;
+  onOpenIndicators: (tab?: "catalog" | "templates") => void;
   activeIndicatorsCount: number;
   activeIndicators?: string[];
   isSidebarOpen: boolean;
@@ -56,6 +60,9 @@ interface TacticalHeaderProps {
   gridSync?: GridSyncConfig;
   onToggleGridSync?: (key: keyof GridSyncConfig) => void;
   onOpenShortcuts?: () => void;
+  onApplyTemplate?: (indicators: string[]) => void;
+  onTakeSnapshot?: () => void;
+  isCapturingSnapshot?: boolean;
 }
 
 const TIMEFRAMES = [
@@ -99,12 +106,23 @@ export function TacticalHeader({
   gridSync = { syncSymbol: false, syncInterval: false, syncCrosshair: true },
   onToggleGridSync,
   onOpenShortcuts,
+  onApplyTemplate,
+  onTakeSnapshot,
+  isCapturingSnapshot = false,
 }: TacticalHeaderProps) {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isGridDropdownOpen, setIsGridDropdownOpen] = useState(false);
+  const [isTemplatesDropdownOpen, setIsTemplatesDropdownOpen] = useState(false);
+  const [quickTemplates, setQuickTemplates] = useState<IndicatorTemplate[]>([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    if (isTemplatesDropdownOpen) {
+      setQuickTemplates(getStoredTemplates());
+    }
+  }, [isTemplatesDropdownOpen]);
 
   useEffect(() => {
     const onHistoryState = (e: Event) => {
@@ -244,8 +262,8 @@ export function TacticalHeader({
 
         {/* Indicators fx Trigger */}
         <button
-          onClick={onOpenIndicators}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container border border-outline-variant/30 text-on-surface text-xs font-mono transition-colors"
+          onClick={() => onOpenIndicators("catalog")}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container border border-outline-variant/30 text-on-surface text-xs font-mono transition-colors cursor-pointer"
         >
           <span className="text-primary font-bold italic">fx</span>
           <span>Indicators</span>
@@ -255,6 +273,98 @@ export function TacticalHeader({
             </span>
           )}
         </button>
+
+        {/* Templates Quick Dropdown (DEC-081) */}
+        <div className="relative">
+          <button
+            onClick={() => setIsTemplatesDropdownOpen((prev) => !prev)}
+            title="Institutional Indicator Templates & Stacks"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-mono transition-colors cursor-pointer ${
+              isTemplatesDropdownOpen
+                ? "bg-primary-container/20 text-primary border-primary/40 font-bold"
+                : "bg-surface-container-low hover:bg-surface-container border-outline-variant/30 text-muted hover:text-on-surface"
+            }`}
+          >
+            <LayoutTemplate size={13} className="text-primary" />
+            <span className="hidden xl:inline">Templates</span>
+            <ChevronDown size={11} className="text-muted" />
+          </button>
+
+          {isTemplatesDropdownOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setIsTemplatesDropdownOpen(false)}
+              />
+              <div className="absolute left-0 top-full mt-1.5 w-64 rounded-lg bg-[#161a25] border border-outline-variant/40 shadow-2xl z-50 p-2 flex flex-col gap-1.5 animate-in fade-in zoom-in-95 duration-100">
+                <div className="flex items-center justify-between px-2 py-1 border-b border-outline-variant/20">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-muted font-bold">
+                    Indicator Stacks
+                  </span>
+                  <button
+                    onClick={() => {
+                      setIsTemplatesDropdownOpen(false);
+                      onOpenIndicators("templates");
+                    }}
+                    className="text-[10px] font-mono text-primary hover:underline cursor-pointer"
+                  >
+                    Manage
+                  </button>
+                </div>
+
+                <div className="max-h-64 overflow-y-auto no-scrollbar space-y-1">
+                  {quickTemplates.map((tpl) => {
+                    const isAllActive =
+                      tpl.indicators.length > 0 &&
+                      tpl.indicators.every((i) => activeIndicators.includes(i));
+                    return (
+                      <button
+                        key={tpl.id}
+                        onClick={() => {
+                          if (onApplyTemplate) {
+                            onApplyTemplate(tpl.indicators);
+                          } else {
+                            window.dispatchEvent(
+                              new CustomEvent("mochex:apply-indicator-template", {
+                                detail: { indicators: tpl.indicators },
+                              })
+                            );
+                          }
+                          setIsTemplatesDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-1.5 rounded flex items-center justify-between hover:bg-surface-container transition-colors cursor-pointer ${
+                          isAllActive
+                            ? "bg-primary/10 text-primary font-bold border border-primary/30"
+                            : "text-on-surface text-xs font-mono"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 overflow-hidden">
+                          {tpl.isStarred && (
+                            <Star size={11} className="text-gold fill-gold shrink-0" />
+                          )}
+                          <span className="truncate text-xs">{tpl.name}</span>
+                        </div>
+                        {isAllActive && <Check size={12} className="text-secondary shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="border-t border-outline-variant/20 pt-1.5 px-1">
+                  <button
+                    onClick={() => {
+                      setIsTemplatesDropdownOpen(false);
+                      onOpenIndicators("templates");
+                    }}
+                    className="w-full text-center py-1 rounded bg-surface-container-low hover:bg-surface-container text-xs font-mono text-primary transition-colors cursor-pointer"
+                  >
+                    + Save or Edit Templates
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Bar Replay Trigger */}
         <button
@@ -506,6 +616,18 @@ export function TacticalHeader({
             className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border border-outline-variant/30 transition-colors cursor-pointer"
           >
             <Keyboard size={15} />
+          </button>
+        )}
+
+        {/* High-Resolution Chart Snapshot Button (DEC-081) */}
+        {onTakeSnapshot && (
+          <button
+            onClick={onTakeSnapshot}
+            disabled={isCapturingSnapshot}
+            title="Capture High-Resolution Chart Snapshot (PNG)"
+            className="p-1.5 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-primary border border-outline-variant/30 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <Camera size={15} className={isCapturingSnapshot ? "animate-pulse text-primary" : ""} />
           </button>
         )}
 

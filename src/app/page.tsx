@@ -9,6 +9,8 @@ import { ScriptStudio } from "@/components/terminal/ScriptStudio";
 import { MarketScreenerDrawer } from "@/components/terminal/MarketScreenerDrawer";
 import { IndicatorsModal } from "@/components/terminal/IndicatorsModal";
 import { ShortcutsCheatsheetModal } from "@/components/terminal/ShortcutsCheatsheetModal";
+import { ChartSnapshotModal } from "@/components/chart/ChartSnapshotModal";
+import { captureChartSnapshot, ChartSnapshotResult } from "@/lib/chart/chart-snapshot";
 import { ReplaySimulationPill } from "@/components/terminal/ReplaySimulationPill";
 import { TradingViewContainer } from "@/components/chart/TradingViewContainer";
 import { MobileTacticalDrawer } from "@/components/mobile/MobileTacticalDrawer";
@@ -72,6 +74,9 @@ export default function WorkstationPage() {
   const [isStudioOpen, setIsStudioOpen] = useState(false);
   const [isScreenerOpen, setIsScreenerOpen] = useState(false);
   const [isIndicatorsModalOpen, setIsIndicatorsModalOpen] = useState(false);
+  const [indicatorsModalTab, setIndicatorsModalTab] = useState<"catalog" | "templates">("catalog");
+  const [snapshotResult, setSnapshotResult] = useState<ChartSnapshotResult | null>(null);
+  const [isCapturingSnapshot, setIsCapturingSnapshot] = useState(false);
   const [isReplayActive, setIsReplayActive] = useState(false);
   const [strategyResult, setStrategyResult] = useState<BacktestPerformance | null>(null);
   const [activeStrategyName, setActiveStrategyName] = useState<string>(STRATEGY_PRESETS[0].name);
@@ -252,11 +257,22 @@ export default function WorkstationPage() {
     window.addEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
     window.addEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
     window.addEventListener("mochex:open-dom", handleOpenSidebarEvent);
+    const handleApplyTemplateEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ indicators: string[] }>).detail;
+      if (detail?.indicators) {
+        setActiveIndicators(detail.indicators);
+        try {
+          localStorage.setItem("mochex:active_indicators", JSON.stringify(detail.indicators));
+        } catch {}
+      }
+    };
+    window.addEventListener("mochex:apply-indicator-template", handleApplyTemplateEvent);
     return () => {
       window.removeEventListener("mochex:open-object-tree", handleOpenSidebarEvent);
       window.removeEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
       window.removeEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
       window.removeEventListener("mochex:open-dom", handleOpenSidebarEvent);
+      window.removeEventListener("mochex:apply-indicator-template", handleApplyTemplateEvent);
     };
   }, []);
 
@@ -370,6 +386,39 @@ export default function WorkstationPage() {
       } catch {}
       return next;
     });
+  };
+
+  const handleOpenIndicators = (tab: "catalog" | "templates" = "catalog") => {
+    setIndicatorsModalTab(tab);
+    setIsIndicatorsModalOpen(true);
+  };
+
+  const handleApplyTemplate = (indicators: string[]) => {
+    setActiveIndicators(indicators);
+    try {
+      localStorage.setItem("mochex:active_indicators", JSON.stringify(indicators));
+    } catch {}
+  };
+
+  const handleTakeSnapshot = async () => {
+    try {
+      setIsCapturingSnapshot(true);
+      const activeEl =
+        document.querySelector<HTMLElement>("#active-chart-container") ||
+        document.querySelector<HTMLElement>("[data-active-pane='true']") ||
+        gridContainerRef.current;
+      if (!activeEl) return;
+      const result = await captureChartSnapshot(activeEl, {
+        symbol,
+        resolution,
+        markPrice: marketStats.price,
+      });
+      setSnapshotResult(result);
+    } catch (err) {
+      console.error("Failed to capture chart snapshot:", err);
+    } finally {
+      setIsCapturingSnapshot(false);
+    }
   };
 
   const handleClearDrawings = () => {
@@ -507,7 +556,7 @@ export default function WorkstationPage() {
         volume24h={marketStats.volume}
         isReplayActive={isReplayActive}
         onToggleReplay={handleToggleReplay}
-        onOpenIndicators={() => setIsIndicatorsModalOpen(true)}
+        onOpenIndicators={handleOpenIndicators}
         activeIndicatorsCount={activeIndicators.length}
         activeIndicators={activeIndicators}
         isSidebarOpen={isSidebarOpen}
@@ -524,6 +573,9 @@ export default function WorkstationPage() {
         gridSync={gridState.sync}
         onToggleGridSync={handleToggleGridSync}
         onOpenShortcuts={() => setIsShortcutsModalOpen(true)}
+        onApplyTemplate={handleApplyTemplate}
+        onTakeSnapshot={handleTakeSnapshot}
+        isCapturingSnapshot={isCapturingSnapshot}
       />
 
       {/* 2. Main Terminal Workspace Body */}
@@ -761,7 +813,9 @@ export default function WorkstationPage() {
         isOpen={isIndicatorsModalOpen}
         onClose={() => setIsIndicatorsModalOpen(false)}
         onApplyIndicator={handleApplyIndicator}
+        onApplyTemplate={handleApplyTemplate}
         activeIndicators={activeIndicators}
+        initialTab={indicatorsModalTab}
         onEditInStudio={() => {
           setIsStudioOpen(true);
         }}
@@ -797,6 +851,13 @@ export default function WorkstationPage() {
       <ShortcutsCheatsheetModal
         isOpen={isShortcutsModalOpen}
         onClose={() => setIsShortcutsModalOpen(false)}
+      />
+
+      {/* 7. High-Resolution Chart Snapshot Modal (DEC-081) */}
+      <ChartSnapshotModal
+        isOpen={Boolean(snapshotResult)}
+        onClose={() => setSnapshotResult(null)}
+        snapshot={snapshotResult}
       />
     </main>
   );

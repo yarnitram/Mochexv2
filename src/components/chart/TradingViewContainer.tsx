@@ -5244,7 +5244,12 @@ export function TradingViewContainer({
         {hasLibrary ? (
           <div id="tv_chart_container" className="w-full h-full" />
         ) : (
-          <div className="w-full h-full relative">
+          <div
+            id={isActivePane ? "active-chart-container" : undefined}
+            data-chart-container="true"
+            data-active-pane={isActivePane ? "true" : "false"}
+            className="w-full h-full relative"
+          >
             {/* Lightweight Charts DOM Mount Container */}
             <div
               ref={chartMountRef}
