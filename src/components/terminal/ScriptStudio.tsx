@@ -176,19 +176,29 @@ export function ScriptStudio({
         setCompileError(null);
         setOutputPoints(res.data?.length || 0);
 
+        let points: Array<{ time: number; value: number }> | null = null;
         if (Array.isArray(res.data)) {
-          const points = (res.data as any[]).map((d) => ({
-            time: typeof d.time === "number" ? d.time : Number(d.time),
-            value: typeof d.value === "number" ? d.value : Number(d.value) || 0,
-          }));
-          setCompiledData(points);
+          points = (res.data as any[])
+            .filter(
+              (d) =>
+                d &&
+                d.time !== undefined &&
+                d.value !== null &&
+                d.value !== undefined &&
+                typeof Number(d.value) === "number" &&
+                !isNaN(Number(d.value))
+            )
+            .map((d) => ({
+              time: typeof d.time === "number" ? d.time : Number(d.time),
+              value: Number(d.value),
+            }));
+          setCompiledData(points.length > 0 ? points : null);
+        } else {
+          setCompiledData(null);
         }
 
-        if (Array.isArray(res.boxes) && res.boxes.length > 0) {
-          setCompiledBoxes(res.boxes);
-        } else {
-          setCompiledBoxes(null);
-        }
+        const boxes = Array.isArray(res.boxes) && res.boxes.length > 0 ? res.boxes : null;
+        setCompiledBoxes(boxes);
 
         if (res.strategyResult) {
           setStrategyResult(res.strategyResult);
@@ -228,6 +238,12 @@ export function ScriptStudio({
             })
           );
         }
+
+        return {
+          success: true,
+          data: points && points.length > 0 ? points : null,
+          boxes,
+        };
       } else {
         setCompileSuccess(false);
         setCompileError(res.error || "Compilation error");
@@ -235,10 +251,20 @@ export function ScriptStudio({
           `[ERROR] Compilation failed: ${res.error}`,
           ...prev.slice(0, 15),
         ]);
+        return {
+          success: false,
+          data: null,
+          boxes: null,
+        };
       }
     } catch (err: any) {
       setCompileSuccess(false);
       setCompileError(err?.message || "Execution exception");
+      return {
+        success: false,
+        data: null,
+        boxes: null,
+      };
     } finally {
       setIsCompiling(false);
     }
@@ -314,16 +340,19 @@ export function ScriptStudio({
     // 1. Ensure saved
     handleSaveScript();
 
-    // 2. Ensure compiled data
+    // 2. Freshly compile current code to get immediate data & boxes
     let dataToPass = compiledData;
-    if (!dataToPass || dataToPass.length === 0) {
-      await runCompilation();
-      dataToPass = compiledData;
+    let boxesToPass = compiledBoxes;
+
+    const comp = await runCompilation();
+    if (comp && comp.success) {
+      dataToPass = comp.data;
+      boxesToPass = comp.boxes;
     }
 
     // 3. Apply to chart
     if (onApplyIndicator) {
-      onApplyIndicator(scriptName, code, dataToPass || undefined, compiledBoxes || undefined);
+      onApplyIndicator(scriptName, code, dataToPass || undefined, boxesToPass || undefined);
     }
     setIsAddedRecently(true);
     setTimeout(() => setIsAddedRecently(false), 3000);

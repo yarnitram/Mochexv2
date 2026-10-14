@@ -141,6 +141,115 @@ function calculate(bars, inputs, ta, strategy, alertcondition) {
   };
 }`;
 
+export const DEFAULT_OB_SCRIPT = `/**
+ * Mochex Custom Indicator: Institutional Order Blocks (OB)
+ * Identifies high-volume baseline candles before expansion moves with 50% Mean Threshold.
+ */
+function calculate(bars, inputs, ta, strategy, alertcondition) {
+  const lookback = inputs.lookback || 3;
+  const volMultiplier = inputs.volMultiplier || 1.1; // Volume multiplier (1.1x 20-period avg)
+  const minBodyPct = inputs.minBodyPct || 0.0015; // Minimum candle body size (0.15%)
+
+  const activeObs = [];
+
+  function getAvgVol(endIdx, len = 20) {
+    let sum = 0;
+    let count = 0;
+    for (let k = Math.max(0, endIdx - len + 1); k <= endIdx; k++) {
+      sum += bars[k].volume || 1;
+      count++;
+    }
+    return sum / (count || 1);
+  }
+
+  for (let i = lookback + 1; i < bars.length; i++) {
+    const obCandle = bars[i - lookback];
+    const avgVol = getAvgVol(i - lookback - 1, 20);
+    const hasVolume = (obCandle.volume || 1) >= avgVol * volMultiplier;
+    const bodySize = Math.abs(obCandle.close - obCandle.open);
+    const bodyPct = bodySize / (obCandle.open || 1);
+
+    // 1. Bullish Order Block (+OB): Bearish candle before strong upward expansion
+    const isBearishCandle = obCandle.close < obCandle.open;
+    const isBullishExpansion = bars[i].close > obCandle.high && 
+                               bars[i - 1].close > obCandle.high;
+
+    if (isBearishCandle && isBullishExpansion && hasVolume && bodyPct >= minBodyPct) {
+      const top = Math.max(obCandle.open, obCandle.close);
+      const bottom = obCandle.low;
+
+      activeObs.push({
+        id: "bull-ob-" + (i - lookback),
+        type: "BULLISH",
+        createdIndex: i - lookback,
+        startTime: obCandle.time,
+        endTime: bars[bars.length - 1].time,
+        top: top,
+        bottom: bottom,
+        mid: (top + bottom) / 2,
+        color: "#089981",
+        fillColor: "rgba(8, 153, 129, 0.22)",
+        label: "+OB",
+        showMidLine: true,
+      });
+
+      if (typeof alertcondition === "function" && i === bars.length - 1) {
+        alertcondition(true, "New Bullish OB", "Bullish Order Block formed at " + bottom.toFixed(2) + " - " + top.toFixed(2));
+      }
+    }
+
+    // 2. Bearish Order Block (-OB): Bullish candle before strong downward expansion
+    const isBullishCandle = obCandle.close > obCandle.open;
+    const isBearishExpansion = bars[i].close < obCandle.low && 
+                               bars[i - 1].close < obCandle.low;
+
+    if (isBullishCandle && isBearishExpansion && hasVolume && bodyPct >= minBodyPct) {
+      const top = obCandle.high;
+      const bottom = Math.min(obCandle.open, obCandle.close);
+
+      activeObs.push({
+        id: "bear-ob-" + (i - lookback),
+        type: "BEARISH",
+        createdIndex: i - lookback,
+        startTime: obCandle.time,
+        endTime: bars[bars.length - 1].time,
+        top: top,
+        bottom: bottom,
+        mid: (top + bottom) / 2,
+        color: "#f23645",
+        fillColor: "rgba(242, 54, 69, 0.22)",
+        label: "-OB",
+        showMidLine: true,
+      });
+
+      if (typeof alertcondition === "function" && i === bars.length - 1) {
+        alertcondition(true, "New Bearish OB", "Bearish Order Block formed at " + bottom.toFixed(2) + " - " + top.toFixed(2));
+      }
+    }
+
+    // 3. Invalidation / Mitigation Check (Price sweeps through the entire zone)
+    for (let k = activeObs.length - 1; k >= 0; k--) {
+      const ob = activeObs[k];
+      if (i > ob.createdIndex) {
+        if ((ob.type === "BULLISH" && bars[i].low < ob.bottom) ||
+            (ob.type === "BEARISH" && bars[i].high > ob.top)) {
+          activeObs.splice(k, 1);
+        }
+      }
+    }
+  }
+
+  // Extend all active unmitigated zones to current live bar
+  const latestTime = bars[bars.length - 1].time;
+  for (const ob of activeObs) {
+    ob.endTime = latestTime;
+  }
+
+  return {
+    boxes: activeObs,
+  };
+}`;
+
 /**
  * Retrieves all saved custom scripts from localStorage
  */
@@ -149,19 +258,31 @@ export function getCustomScripts(): CustomScript[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      // Seed initial FVG script if clean state
-      const initial: CustomScript = {
-        id: "script-fvg-unmitigated",
-        name: "Unmitigated FVG (0% Hit)",
-        description: "Strict 0% wick touch Fair Value Gap detector with 50% equilibrium level.",
-        code: DEFAULT_FVG_SCRIPT,
-        type: "indicator",
-        color: "#00d8ff",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify([initial]));
-      return [initial];
+      // Seed initial FVG and Order Block scripts if clean state
+      const initial: CustomScript[] = [
+        {
+          id: "script-fvg-unmitigated",
+          name: "Unmitigated FVG (0% Hit)",
+          description: "Strict 0% wick touch Fair Value Gap detector with 50% equilibrium level.",
+          code: DEFAULT_FVG_SCRIPT,
+          type: "indicator",
+          color: "#00d8ff",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        {
+          id: "script-order-blocks",
+          name: "Institutional Order Blocks (OB)",
+          description: "Identifies unmitigated baseline order block candles with 50% Mean Threshold.",
+          code: DEFAULT_OB_SCRIPT,
+          type: "indicator",
+          color: "#089981",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+      return initial;
     }
     return JSON.parse(raw);
   } catch (err) {

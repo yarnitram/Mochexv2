@@ -828,6 +828,8 @@ export default function WorkstationPage() {
               handleApplyIndicator(name);
               if (data && data.length > 0) {
                 setCustomIndicatorData({ name, data, color: "#00d8ff" });
+              } else {
+                setCustomIndicatorData(null);
               }
               if (boxes && boxes.length > 0) {
                 if (typeof window !== "undefined") {
