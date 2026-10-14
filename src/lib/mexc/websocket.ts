@@ -1,12 +1,15 @@
 import {
   CandlestickBar,
   DepthLevel,
+  MexcDealItem,
+  MexcDealsWsPayload,
   MexcDepthData,
   MexcDepthWsPayload,
   MexcKlineWsPayload,
   MexcMiniTickerItem,
   MexcMiniTickerWsPayload,
   parseDepthLevels,
+  parseWsDeals,
   parseWsKline,
   WS_INTERVAL_MAP,
 } from "./types";
@@ -14,6 +17,7 @@ import {
 export type KlineCallback = (bar: CandlestickBar) => void;
 export type MiniTickerCallback = (tickers: MexcMiniTickerItem[]) => void;
 export type DepthCallback = (depth: MexcDepthData) => void;
+export type DealsCallback = (deals: MexcDealItem[]) => void;
 
 export class MexcWebSocketManager {
   private ws: WebSocket | null = null;
@@ -21,6 +25,7 @@ export class MexcWebSocketManager {
   private klineSubscriptions: Map<string, Set<KlineCallback>> = new Map();
   private miniTickerSubscriptions: Set<MiniTickerCallback> = new Set();
   private depthSubscriptions: Map<string, Set<DepthCallback>> = new Map();
+  private dealsSubscriptions: Map<string, Set<DealsCallback>> = new Map();
   private pingInterval: NodeJS.Timeout | null = null;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private isExplicitlyClosed = false;
@@ -116,8 +121,8 @@ export class MexcWebSocketManager {
     }
   }
 
-  public subscribeDepth(symbol: string, callback: DepthCallback): string {
-    const channel = `spot@public.limit.depth.v3.api@${symbol.toUpperCase()}@5`;
+  public subscribeDepth(symbol: string, callback: DepthCallback, level: 5 | 10 | 20 = 20): string {
+    const channel = `spot@public.limit.depth.v3.api@${symbol.toUpperCase()}@${level}`;
     if (!this.depthSubscriptions.has(channel)) {
       this.depthSubscriptions.set(channel, new Set());
       this.sendSubscription(channel);
@@ -138,6 +143,32 @@ export class MexcWebSocketManager {
 
     if (listeners.size === 0) {
       this.depthSubscriptions.delete(channel);
+      this.sendUnsubscription(channel);
+    }
+  }
+
+  public subscribeDeals(symbol: string, callback: DealsCallback): string {
+    const channel = `spot@public.deals.v3.api@${symbol.toUpperCase()}`;
+    if (!this.dealsSubscriptions.has(channel)) {
+      this.dealsSubscriptions.set(channel, new Set());
+      this.sendSubscription(channel);
+    }
+    this.dealsSubscriptions.get(channel)!.add(callback);
+    return channel;
+  }
+
+  public unsubscribeDeals(channel: string, callback?: DealsCallback): void {
+    const listeners = this.dealsSubscriptions.get(channel);
+    if (!listeners) return;
+
+    if (callback) {
+      listeners.delete(callback);
+    } else {
+      listeners.clear();
+    }
+
+    if (listeners.size === 0) {
+      this.dealsSubscriptions.delete(channel);
       this.sendUnsubscription(channel);
     }
   }
@@ -182,6 +213,19 @@ export class MexcWebSocketManager {
           listeners.forEach((fn) => fn(depthData));
         }
       }
+
+      // Handle Deals / Trades Stream (DEC-080)
+      if (data?.c && data.c.includes("public.deals.v3.api") && data?.d?.deals) {
+        const payload = data as MexcDealsWsPayload;
+        const channel = payload.c;
+        const listeners = this.dealsSubscriptions.get(channel);
+        if (listeners && listeners.size > 0) {
+          const deals = parseWsDeals(payload.d.deals);
+          if (deals.length > 0) {
+            listeners.forEach((fn) => fn(deals));
+          }
+        }
+      }
     } catch (_err) {
       // Ignore unparseable frames
     }
@@ -214,6 +258,9 @@ export class MexcWebSocketManager {
       this.sendSubscription(channel);
     }
     for (const channel of this.depthSubscriptions.keys()) {
+      this.sendSubscription(channel);
+    }
+    for (const channel of this.dealsSubscriptions.keys()) {
       this.sendSubscription(channel);
     }
     if (this.miniTickerSubscriptions.size > 0) {

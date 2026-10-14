@@ -251,10 +251,12 @@ export default function WorkstationPage() {
     window.addEventListener("mochex:open-object-tree", handleOpenSidebarEvent);
     window.addEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
     window.addEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
+    window.addEventListener("mochex:open-dom", handleOpenSidebarEvent);
     return () => {
       window.removeEventListener("mochex:open-object-tree", handleOpenSidebarEvent);
       window.removeEventListener("mochex:execute-paper-order", handleOpenSidebarEvent);
       window.removeEventListener("mochex:open-paper-trade", handleOpenSidebarEvent);
+      window.removeEventListener("mochex:open-dom", handleOpenSidebarEvent);
     };
   }, []);
 

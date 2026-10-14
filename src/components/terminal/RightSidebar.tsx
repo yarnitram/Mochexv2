@@ -12,6 +12,7 @@ import {
   Pause,
   Flame,
   Star,
+  Activity,
   ChevronDown,
   ChevronUp,
   Trash2,
@@ -33,6 +34,7 @@ import {
 import { mexcWsManager } from "@/lib/mexc/websocket";
 import { MexcMiniTickerItem } from "@/lib/mexc/types";
 import { OrderDepthLadder } from "./OrderDepthLadder";
+import { DepthOfMarketTape } from "./DepthOfMarketTape";
 import { AddPairModal } from "../watchlist/AddPairModal";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { ChartDrawing, formatDrawingObjectLabel } from "@/lib/chart/drawing-math";
@@ -107,7 +109,7 @@ export function RightSidebar({
   activeIndicators = [],
   onToggleIndicator,
 }: RightSidebarProps) {
-  const [activeTab, setActiveTab] = useState<"watchlist" | "trade" | "alerts" | "objects" | "hot">("watchlist");
+  const [activeTab, setActiveTab] = useState<"watchlist" | "trade" | "dom" | "alerts" | "objects" | "hot">("watchlist");
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddPairOpen, setIsAddPairOpen] = useState(false);
   const [isListDropdownOpen, setIsListDropdownOpen] = useState(false);
@@ -345,11 +347,17 @@ export function RightSidebar({
       setActiveTab("trade");
     };
 
+    const handleOpenDom = () => {
+      setActiveTab("dom");
+    };
+
     window.addEventListener("mochex:execute-paper-order", handleExecutePaperOrder);
     window.addEventListener("mochex:open-paper-trade", handleOpenPaperTrade);
+    window.addEventListener("mochex:open-dom", handleOpenDom);
     return () => {
       window.removeEventListener("mochex:execute-paper-order", handleExecutePaperOrder);
       window.removeEventListener("mochex:open-paper-trade", handleOpenPaperTrade);
+      window.removeEventListener("mochex:open-dom", handleOpenDom);
     };
   }, [selectedSymbol, savePaperAccount]);
 
@@ -973,6 +981,17 @@ export function RightSidebar({
             )}
           </button>
           <button
+            onClick={() => setActiveTab("dom")}
+            className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+              activeTab === "dom"
+                ? "bg-primary-container text-white shadow-xs"
+                : "text-muted hover:text-on-surface"
+            }`}
+          >
+            <Activity size={10} />
+            <span>DOM</span>
+          </button>
+          <button
             onClick={() => setActiveTab("alerts")}
             className={`px-1.5 py-1 rounded text-[10px] font-mono font-medium transition-colors flex items-center gap-1 cursor-pointer ${
               activeTab === "alerts"
@@ -1504,6 +1523,26 @@ export function RightSidebar({
             )}
           </div>
         </div>
+      ) : activeTab === "dom" ? (
+        <DepthOfMarketTape
+          symbol={selectedSymbol}
+          currentPrice={currentPrice}
+          openOrders={paperAccount.orders}
+          onExecutePaperOrder={(order) => {
+            const mark = currentPriceRef.current || currentPrice;
+            const res = placePaperOrder(paperAccountRef.current, order, mark, Date.now());
+            savePaperAccount(res.state);
+            setTradeFeedback(res.message);
+            if (isSoundEnabledRef.current) {
+              playInstitutionalAlertChime();
+            }
+          }}
+          onCancelPaperOrder={(orderId) => {
+            const next = cancelPaperOrder(paperAccountRef.current, orderId);
+            savePaperAccount(next);
+            setTradeFeedback("Order cancelled");
+          }}
+        />
       ) : activeTab === "objects" ? (
         <div className="flex-1 flex flex-col overflow-hidden font-mono">
           {/* Object Tree Header */}
@@ -2180,7 +2219,9 @@ export function RightSidebar({
       )}
 
       {/* Mini Order Depth Ladder Component */}
-      <OrderDepthLadder symbol={selectedSymbol} currentPrice={currentPrice} />
+      {(activeTab === "watchlist" || activeTab === "hot") && (
+        <OrderDepthLadder symbol={selectedSymbol} currentPrice={currentPrice} />
+      )}
 
       {/* Add Pair Search Modal */}
       <AddPairModal

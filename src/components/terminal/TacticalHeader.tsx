@@ -21,6 +21,7 @@ import {
   Square,
   Keyboard,
   Radar,
+  Activity,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
@@ -315,6 +316,18 @@ export function TacticalHeader({
             <span className="hidden lg:inline">Screener</span>
           </button>
         )}
+
+        {/* DOM & Aggressor Tape Sidebar Trigger (DEC-080) */}
+        <button
+          onClick={() => {
+            window.dispatchEvent(new CustomEvent("mochex:open-dom"));
+          }}
+          title="Open Depth of Market (DOM) Heatmap & Live Aggressor Tape"
+          className="flex items-center gap-1 px-2 py-1 rounded bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border border-outline-variant/30 text-[11px] font-mono transition-colors cursor-pointer"
+        >
+          <Activity size={14} className="text-secondary" />
+          <span className="hidden lg:inline">DOM / Tape</span>
+        </button>
 
         {/* Script Studio Dock Toggle */}
         <button

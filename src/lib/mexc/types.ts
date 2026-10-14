@@ -163,3 +163,44 @@ export function parseWsKline(data: MexcKlineWsPayload["d"]["k"]): CandlestickBar
   };
 }
 
+export interface MexcDealItem {
+  id?: string;
+  price: number;
+  amount: number;
+  time: number;
+  side: "buy" | "sell";
+  quoteAmount: number; // price * amount
+}
+
+export interface MexcDealsWsPayload {
+  c: string; // e.g. spot@public.deals.v3.api@BTCUSDT
+  d: {
+    deals: Array<{
+      p: string | number; // price
+      v: string | number; // volume / amount
+      S: 1 | 2 | "1" | "2" | "buy" | "sell"; // 1: Buy, 2: Sell
+      t: number; // timestamp in ms
+    }>;
+  };
+  s?: string;
+  t?: number;
+}
+
+export function parseWsDeals(rawDeals?: MexcDealsWsPayload["d"]["deals"]): MexcDealItem[] {
+  if (!rawDeals || !Array.isArray(rawDeals)) return [];
+  return rawDeals.map((d, idx) => {
+    const price = typeof d.p === "number" ? d.p : parseFloat(d.p) || 0;
+    const amount = typeof d.v === "number" ? d.v : parseFloat(d.v) || 0;
+    const side = d.S === 1 || d.S === "1" || d.S === "buy" ? "buy" : "sell";
+    const quoteAmount = price * amount;
+    return {
+      id: `${d.t || Date.now()}-${idx}-${price}-${amount}`,
+      price,
+      amount,
+      time: d.t || Date.now(),
+      side,
+      quoteAmount,
+    };
+  });
+}
+
