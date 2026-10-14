@@ -8,6 +8,10 @@ import {
   parseSplitSizes,
   SIDEBAR_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
+  clampScreenerHeight,
+  computeScreenerHeightFromDrag,
+  SCREENER_MIN_HEIGHT,
+  SCREENER_DEFAULT_HEIGHT,
 } from "@/lib/ui/resizable-layout";
 
 const key = (overrides: Partial<ShortcutKeyInput>): ShortcutKeyInput => ({
@@ -59,5 +63,12 @@ describe("Resizable layout math (DEC-077)", () => {
     expect(parsed["2x1"].col).toBeCloseTo(0.85);
     expect(parsed["1x2"].row).toBe(0.5);
     expect(parseSplitSizes("not-json")["2x2"].col).toBe(0.5);
+  });
+
+  it("clamps screener drawer height and widens upwards when dragging up", () => {
+    expect(clampScreenerHeight(50)).toBe(SCREENER_MIN_HEIGHT);
+    expect(clampScreenerHeight(9999, 800)).toBe(800);
+    expect(computeScreenerHeightFromDrag(340, 700, 600)).toBe(440);
+    expect(computeScreenerHeightFromDrag(340, 700, 900)).toBe(SCREENER_MIN_HEIGHT);
   });
 });

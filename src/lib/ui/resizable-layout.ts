@@ -7,6 +7,10 @@ export const SIDEBAR_MIN_WIDTH = 260;
 export const SIDEBAR_MAX_WIDTH = 560;
 export const SIDEBAR_DEFAULT_WIDTH = 320;
 
+export const SCREENER_MIN_HEIGHT = 200;
+export const SCREENER_DEFAULT_HEIGHT = 340;
+export const SCREENER_MAX_HEIGHT_CAP = 860;
+
 export const SPLIT_MIN_FRACTION = 0.15;
 export const SPLIT_MAX_FRACTION = 0.85;
 
@@ -35,6 +39,25 @@ export function clampSidebarWidth(width: number): number {
  */
 export function computeSidebarWidthFromDrag(startWidth: number, startX: number, currentX: number): number {
   return clampSidebarWidth(startWidth + (startX - currentX));
+}
+
+export function clampScreenerHeight(height: number, maxAllowed = SCREENER_MAX_HEIGHT_CAP): number {
+  if (!Number.isFinite(height)) return SCREENER_DEFAULT_HEIGHT;
+  const effectiveMax = Math.max(SCREENER_MIN_HEIGHT + 50, maxAllowed);
+  return Math.round(Math.max(SCREENER_MIN_HEIGHT, Math.min(effectiveMax, height)));
+}
+
+/**
+ * Screener drawer is anchored at the bottom of the Center Workspace,
+ * so dragging the top handle upward (decreasing pointer Y, startY - currentY > 0) increases height.
+ */
+export function computeScreenerHeightFromDrag(
+  startHeight: number,
+  startY: number,
+  currentY: number,
+  maxAllowed = SCREENER_MAX_HEIGHT_CAP
+): number {
+  return clampScreenerHeight(startHeight + (startY - currentY), maxAllowed);
 }
 
 export function clampSplitFraction(fraction: number): number {

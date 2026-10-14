@@ -20,6 +20,7 @@ import {
   Rows2,
   Square,
   Keyboard,
+  Radar,
 } from "lucide-react";
 import { AuthUser } from "@/lib/auth/use-auth";
 import { LayoutDropdown, SavedLayoutItem } from "./LayoutDropdown";
@@ -44,6 +45,8 @@ interface TacticalHeaderProps {
   onToggleSidebar: () => void;
   isStudioOpen: boolean;
   onToggleStudio: () => void;
+  isScreenerOpen?: boolean;
+  onToggleScreener?: () => void;
   user?: AuthUser | null;
   onOpenAuthModal?: () => void;
   onLoadLayout?: (layout: SavedLayoutItem) => void;
@@ -85,6 +88,8 @@ export function TacticalHeader({
   onToggleSidebar,
   isStudioOpen,
   onToggleStudio,
+  isScreenerOpen = false,
+  onToggleScreener,
   user = null,
   onOpenAuthModal,
   onLoadLayout = () => {},
@@ -293,8 +298,24 @@ export function TacticalHeader({
         </div>
       </div>
 
-      {/* Right: Studio Toggle + Layout Manager Dropdown + User Profile */}
+      {/* Right: Screener + Studio Toggle + Layout Manager Dropdown + User Profile */}
       <div className="flex items-center gap-1.5">
+        {/* Crypto Technical Screener Dock Toggle */}
+        {onToggleScreener && (
+          <button
+            onClick={onToggleScreener}
+            title="Toggle Crypto Technical Screener & Heatmap (Alt+S)"
+            className={`flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-mono transition-colors cursor-pointer ${
+              isScreenerOpen
+                ? "bg-primary-container/20 text-primary border-primary/40 font-bold"
+                : "bg-surface-container-low hover:bg-surface-container text-muted hover:text-on-surface border-outline-variant/30"
+            }`}
+          >
+            <Radar size={14} />
+            <span className="hidden lg:inline">Screener</span>
+          </button>
+        )}
+
         {/* Script Studio Dock Toggle */}
         <button
           onClick={onToggleStudio}

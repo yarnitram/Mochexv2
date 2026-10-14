@@ -6,6 +6,7 @@ import { TacticalHeader } from "@/components/terminal/TacticalHeader";
 import { DrawingRail, DrawingToolType } from "@/components/terminal/DrawingRail";
 import { RightSidebar } from "@/components/terminal/RightSidebar";
 import { ScriptStudio } from "@/components/terminal/ScriptStudio";
+import { MarketScreenerDrawer } from "@/components/terminal/MarketScreenerDrawer";
 import { IndicatorsModal } from "@/components/terminal/IndicatorsModal";
 import { ShortcutsCheatsheetModal } from "@/components/terminal/ShortcutsCheatsheetModal";
 import { ReplaySimulationPill } from "@/components/terminal/ReplaySimulationPill";
@@ -69,6 +70,7 @@ export default function WorkstationPage() {
   const [resolution, setResolution] = useState("15");
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isStudioOpen, setIsStudioOpen] = useState(false);
+  const [isScreenerOpen, setIsScreenerOpen] = useState(false);
   const [isIndicatorsModalOpen, setIsIndicatorsModalOpen] = useState(false);
   const [isReplayActive, setIsReplayActive] = useState(false);
   const [strategyResult, setStrategyResult] = useState<BacktestPerformance | null>(null);
@@ -148,6 +150,7 @@ export default function WorkstationPage() {
       const savedRes = localStorage.getItem("mochex:resolution");
       const savedSidebar = localStorage.getItem("mochex:sidebar_open");
       const savedStudio = localStorage.getItem("mochex:studio_open");
+      const savedScreener = localStorage.getItem("mochex:screener_open");
       const savedIndicators = localStorage.getItem("mochex:active_indicators");
       const savedFavs = localStorage.getItem("mochex:favorite_drawing_tools");
       const savedShowFavs = localStorage.getItem("mochex:show_favorites_bar");
@@ -176,6 +179,7 @@ export default function WorkstationPage() {
 
       if (savedSidebar !== null) setIsSidebarOpen(savedSidebar === "true");
       if (savedStudio !== null) setIsStudioOpen(savedStudio === "true");
+      if (savedScreener !== null) setIsScreenerOpen(savedScreener === "true");
       if (savedIndicators) setActiveIndicators(JSON.parse(savedIndicators));
       if (savedFavs) setFavoriteTools(JSON.parse(savedFavs));
       if (savedShowFavs !== null) setShowFavoritesBar(savedShowFavs === "true");
@@ -200,7 +204,7 @@ export default function WorkstationPage() {
     } catch {}
   }, [splitSizes]);
 
-  // Alt+Enter shortcut to Maximize / Restore active split pane & '?' for Shortcuts Cheatsheet (DEC-075 & DEC-077)
+  // Alt+Enter shortcut to Maximize / Restore active split pane, Alt+S for Screener, & '?' for Shortcuts Cheatsheet (DEC-075, DEC-077, DEC-078)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(document.activeElement)) return;
@@ -209,6 +213,18 @@ export default function WorkstationPage() {
         setGridState((prev) => {
           if (prev.layoutMode === "1x1") return prev;
           return toggleMaximizePane(prev, prev.activePaneId);
+        });
+        return;
+      }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyS") {
+        e.preventDefault();
+        setIsScreenerOpen((prev) => {
+          const next = !prev;
+          if (next) setIsStudioOpen(false);
+          try {
+            localStorage.setItem("mochex:screener_open", String(next));
+          } catch {}
+          return next;
         });
         return;
       }
@@ -305,8 +321,30 @@ export default function WorkstationPage() {
   const handleToggleStudio = () => {
     setIsStudioOpen((prev) => {
       const next = !prev;
+      if (next) {
+        setIsScreenerOpen(false);
+        try {
+          localStorage.setItem("mochex:screener_open", "false");
+        } catch {}
+      }
       try {
         localStorage.setItem("mochex:studio_open", String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handleToggleScreener = () => {
+    setIsScreenerOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setIsStudioOpen(false);
+        try {
+          localStorage.setItem("mochex:studio_open", "false");
+        } catch {}
+      }
+      try {
+        localStorage.setItem("mochex:screener_open", String(next));
       } catch {}
       return next;
     });
@@ -474,6 +512,8 @@ export default function WorkstationPage() {
         onToggleSidebar={handleToggleSidebar}
         isStudioOpen={isStudioOpen}
         onToggleStudio={handleToggleStudio}
+        isScreenerOpen={isScreenerOpen}
+        onToggleScreener={handleToggleScreener}
         user={user}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onLoadLayout={handleLoadLayout}
@@ -663,6 +703,24 @@ export default function WorkstationPage() {
               <ReplaySimulationPill onClose={() => setIsReplayActive(false)} />
             )}
           </div>
+
+          {/* Bottom Crypto Technical Screener & 2D Market Heatmap Drawer (DEC-078) */}
+          <MarketScreenerDrawer
+            isOpen={isScreenerOpen}
+            onClose={() => {
+              setIsScreenerOpen(false);
+              try {
+                localStorage.setItem("mochex:screener_open", "false");
+              } catch {}
+            }}
+            selectedSymbol={symbol}
+            activeResolution={resolution}
+            onSelectSymbol={handleSelectSymbol}
+            onSelectResolution={handleSelectResolution}
+            activePaneId={gridState.activePaneId}
+            isSplitGrid={gridState.layoutMode !== "1x1"}
+            syncSymbol={gridState.sync.syncSymbol}
+          />
 
           {/* Bottom Script Studio (Collapsible Split Panel) */}
           <ScriptStudio
