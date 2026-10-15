@@ -33,6 +33,7 @@ import { GridLayoutMode, GridSyncConfig } from "@/lib/chart/multi-chart-grid";
 import { IndicatorTemplate, getStoredTemplates } from "@/lib/indicators/templates";
 import { SymbolSearchModal } from "./SymbolSearchModal";
 import { isTypingTarget } from "@/lib/ui/keyboard-shortcuts";
+import { TimeframeSelector } from "./TimeframeSelector";
 
 interface TacticalHeaderProps {
   symbol: string;
@@ -68,15 +69,7 @@ interface TacticalHeaderProps {
   isCapturingSnapshot?: boolean;
 }
 
-const TIMEFRAMES = [
-  { label: "1m", value: "1" },
-  { label: "5m", value: "5" },
-  { label: "15m", value: "15" },
-  { label: "1H", value: "60" },
-  { label: "4H", value: "240" },
-  { label: "1D", value: "1D" },
-  { label: "1W", value: "1W" },
-];
+
 
 const POPULAR_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MXUSDT", "XRPUSDT", "DOGEUSDT"];
 
@@ -240,25 +233,8 @@ export function TacticalHeader({
 
       {/* Middle: Resolution Ribbon + Indicators Trigger + Bar Replay + Undo/Redo */}
       <div className="hidden md:flex items-center gap-2">
-        {/* Resolution Buttons */}
-        <div className="flex items-center bg-surface-container-lowest p-0.5 rounded border border-border">
-          {TIMEFRAMES.map((tf) => {
-            const isActive = resolution === tf.value;
-            return (
-              <button
-                key={tf.value}
-                onClick={() => onSelectResolution(tf.value)}
-                className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
-                  isActive
-                    ? "bg-primary-container text-white font-bold shadow-xs"
-                    : "text-muted hover:text-on-surface hover:bg-surface-container-high"
-                }`}
-              >
-                {tf.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* TradingView-Style Timeframe Selector & Dropdown */}
+        <TimeframeSelector resolution={resolution} onSelectResolution={onSelectResolution} />
 
         {/* Indicators fx Trigger */}
         <button
