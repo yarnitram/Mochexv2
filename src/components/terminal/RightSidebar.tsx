@@ -51,6 +51,7 @@ import {
   removeSymbolFromProfile,
 } from "@/lib/watchlist/watchlist-profiles";
 import { ChartDrawing, formatDrawingObjectLabel } from "@/lib/chart/drawing-math";
+import { calculatePricePrecision } from "@/lib/chart/price-precision";
 import {
   PriceAlert,
   AlertLogEntry,
@@ -2393,7 +2394,7 @@ export function RightSidebar({
 
                   {/* Price */}
                   <div className="col-span-4 text-right font-mono text-xs font-semibold text-on-surface">
-                    {t.price >= 1 ? t.price.toFixed(2) : t.price.toFixed(4)}
+                    {calculatePricePrecision(t.price).formatPrice(t.price)}
                   </div>
 
                   {/* Change Pill + Quick Remove */}

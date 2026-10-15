@@ -47,6 +47,7 @@ import {
   DEFAULT_FIB_LEVELS,
 } from "@/lib/chart/drawing-math";
 import { DrawingSettingsModal } from "./DrawingSettingsModal";
+import { calculatePricePrecision } from "@/lib/chart/price-precision";
 import { FavoritesToolbar } from "../terminal/FavoritesToolbar";
 import {
   createChart,
@@ -270,6 +271,12 @@ export function TradingViewContainer({
   const lastWsTickTimeRef = useRef<number>(0);
   const [isCustomIndicatorHidden, setIsCustomIndicatorHidden] = useState(false);
 
+  // Dynamic Price Precision & Tick Step (DEC-097)
+  const pricePrecision = useMemo(() => {
+    const refPrice = currentPrice || (bars.length > 0 ? bars[bars.length - 1].close : 0);
+    return calculatePricePrecision(refPrice, bars);
+  }, [currentPrice, bars]);
+
   // Geometric drawing tools state (DEC-040 to DEC-049)
   const [drawings, setDrawings] = useState<ChartDrawing[]>([]);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
@@ -373,10 +380,26 @@ export function TradingViewContainer({
         barSpacing: 8,
         minBarSpacing: 2,
       },
+      localization: {
+        priceFormatter: (p: number) => {
+          const info = calculatePricePrecision(p, barsRef.current);
+          return info.formatPrice(p);
+        },
+      },
       autoSize: true,
     });
 
     chartRef.current = chart;
+
+    const initialPrec = calculatePricePrecision(
+      barsRef.current[barsRef.current.length - 1]?.close || 0,
+      barsRef.current
+    );
+    const initialPriceFormat = {
+      type: "price" as const,
+      precision: initialPrec.precision,
+      minMove: initialPrec.minMove,
+    };
 
     // 2.1 Candlestick Series
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -387,6 +410,7 @@ export function TradingViewContainer({
       borderDownColor: "#ff3b30",
       wickUpColor: "#00c087",
       wickDownColor: "#ff3b30",
+      priceFormat: initialPriceFormat,
     });
     candleSeriesRef.current = candleSeries;
 
@@ -411,6 +435,7 @@ export function TradingViewContainer({
       lineWidth: 1,
       priceScaleId: "right",
       title: "EMA 20",
+      priceFormat: initialPriceFormat,
     });
     ema20SeriesRef.current = ema20Series;
 
@@ -419,6 +444,7 @@ export function TradingViewContainer({
       lineWidth: 2,
       priceScaleId: "right",
       title: "EMA 50",
+      priceFormat: initialPriceFormat,
     });
     ema50SeriesRef.current = ema50Series;
 
@@ -427,6 +453,7 @@ export function TradingViewContainer({
       lineWidth: 3,
       priceScaleId: "right",
       title: "EMA 100",
+      priceFormat: initialPriceFormat,
     });
     ema100SeriesRef.current = ema100Series;
 
@@ -435,6 +462,7 @@ export function TradingViewContainer({
       lineWidth: 4,
       priceScaleId: "right",
       title: "EMA 200",
+      priceFormat: initialPriceFormat,
     });
     ema200SeriesRef.current = ema200Series;
 
@@ -445,6 +473,7 @@ export function TradingViewContainer({
       priceScaleId: "right",
       title: "BB Upper",
       visible: false,
+      priceFormat: initialPriceFormat,
     });
     bbUpperSeriesRef.current = bbUpperSeries;
 
@@ -454,6 +483,7 @@ export function TradingViewContainer({
       priceScaleId: "right",
       title: "BB Basis",
       visible: false,
+      priceFormat: initialPriceFormat,
     });
     bbMiddleSeriesRef.current = bbMiddleSeries;
 
@@ -463,6 +493,7 @@ export function TradingViewContainer({
       priceScaleId: "right",
       title: "BB Lower",
       visible: false,
+      priceFormat: initialPriceFormat,
     });
     bbLowerSeriesRef.current = bbLowerSeries;
 
@@ -1539,6 +1570,11 @@ export function TradingViewContainer({
           lineWidth: 2,
           priceScaleId: "right",
           title: customIndicatorData.name,
+          priceFormat: {
+            type: "price",
+            precision: pricePrecision.precision,
+            minMove: pricePrecision.minMove,
+          },
         });
 
         const formatted = customIndicatorData.data
@@ -1567,7 +1603,7 @@ export function TradingViewContainer({
       }
     }
     setIsCustomIndicatorHidden(false);
-  }, [customIndicatorData]);
+  }, [customIndicatorData, pricePrecision]);
 
   // Synchronize custom indicator series visibility when toggled via HUD or Objects tab (DEC-095/DEC-096)
   useEffect(() => {
@@ -1582,6 +1618,38 @@ export function TradingViewContainer({
       } catch {}
     }
   }, [isCustomIndicatorHidden, hiddenIndicators, customIndicatorData]);
+
+  // Synchronize dynamic price precision across series, price scales & crosshairs (DEC-097)
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    try {
+      chart.applyOptions({
+        localization: {
+          priceFormatter: pricePrecision.formatPrice,
+        },
+      });
+    } catch {}
+
+    const formatOpt = {
+      priceFormat: {
+        type: "price" as const,
+        precision: pricePrecision.precision,
+        minMove: pricePrecision.minMove,
+      },
+    };
+
+    candleSeriesRef.current?.applyOptions(formatOpt);
+    ema20SeriesRef.current?.applyOptions(formatOpt);
+    ema50SeriesRef.current?.applyOptions(formatOpt);
+    ema100SeriesRef.current?.applyOptions(formatOpt);
+    ema200SeriesRef.current?.applyOptions(formatOpt);
+    bbUpperSeriesRef.current?.applyOptions(formatOpt);
+    bbMiddleSeriesRef.current?.applyOptions(formatOpt);
+    bbLowerSeriesRef.current?.applyOptions(formatOpt);
+    customIndicatorSeriesRef.current?.applyOptions(formatOpt);
+  }, [pricePrecision]);
 
   // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
   const DRAWING_COLORS = [
@@ -2205,7 +2273,7 @@ export function TradingViewContainer({
       ctx.setLineDash([]);
 
       // Scale price badge on right margin (TradingView style)
-      const badgeText = `$${drawing.startPrice.toFixed(2)}`;
+      const badgeText = `$${pricePrecision.formatPrice(drawing.startPrice)}`;
       ctx.font = "10px monospace";
       const textW = ctx.measureText(badgeText).width;
       ctx.fillStyle = color;
@@ -2470,9 +2538,9 @@ export function TradingViewContainer({
           ctx.fillText(text, tagX + 4, y);
         };
 
-        renderRightTag(yTarget, `TP: $${metrics.targetPrice.toFixed(2)}`, profitColor);
-        renderRightTag(yEntry, `Entry: $${metrics.entryPrice.toFixed(2)}`, "#2962ff");
-        renderRightTag(yStop, `SL: $${metrics.stopPrice.toFixed(2)}`, stopColor);
+        renderRightTag(yTarget, `TP: $${pricePrecision.formatPrice(metrics.targetPrice)}`, profitColor);
+        renderRightTag(yEntry, `Entry: $${pricePrecision.formatPrice(metrics.entryPrice)}`, "#2962ff");
+        renderRightTag(yStop, `SL: $${pricePrecision.formatPrice(metrics.stopPrice)}`, stopColor);
       }
     },
     [getSafeScreenY]
@@ -2624,7 +2692,7 @@ export function TradingViewContainer({
         ctx.lineTo(rightX, y);
         ctx.stroke();
 
-        const label = `${lvl.ratio} ($${lvl.price.toFixed(2)})`;
+        const label = `${lvl.ratio} ($${pricePrecision.formatPrice(lvl.price)})`;
         ctx.font = "10px monospace";
         ctx.fillStyle = lvl.color;
         ctx.textAlign = "left";
@@ -2803,7 +2871,7 @@ export function TradingViewContainer({
         ctx.stroke();
         ctx.setLineDash([]);
 
-        const label = `${lvl.ratio} ($${lvl.price.toFixed(2)})`;
+        const label = `${lvl.ratio} ($${pricePrecision.formatPrice(lvl.price)})`;
         ctx.font = "10px monospace";
         ctx.fillStyle = lvl.color;
         ctx.textAlign = "left";
@@ -3704,10 +3772,7 @@ export function TradingViewContainer({
           ctx.stroke();
           ctx.setLineDash([]);
 
-          const priceFormatted =
-            alert.targetPrice >= 1
-              ? alert.targetPrice.toFixed(2)
-              : alert.targetPrice.toFixed(4);
+          const priceFormatted = pricePrecision.formatPrice(alert.targetPrice);
           const tagText = `🔔 $${priceFormatted}`;
           ctx.font = "bold 10px monospace";
           const tagW = ctx.measureText(tagText).width + 12;
@@ -3781,7 +3846,7 @@ export function TradingViewContainer({
         const mark = currentPrice && currentPrice > 0 ? currentPrice : pos.entryPrice;
         const pnl = calculatePositionUnrealizedPnl(pos, mark);
         const sign = pnl.unrealizedPnl >= 0 ? "+" : "";
-        const entryFmt = pos.entryPrice >= 1 ? pos.entryPrice.toFixed(2) : pos.entryPrice.toFixed(4);
+        const entryFmt = pricePrecision.formatPrice(pos.entryPrice);
         const sideColor = pos.side === "long" ? "#00c087" : "#ff3b30";
         const pnlStr = `${sign}$${pnl.unrealizedPnl.toFixed(2)} (${sign}${pnl.roePercent.toFixed(1)}%)`;
 
@@ -3795,7 +3860,7 @@ export function TradingViewContainer({
         );
 
         if (pos.takeProfit && pos.takeProfit > 0) {
-          const tpFmt = pos.takeProfit >= 1 ? pos.takeProfit.toFixed(2) : pos.takeProfit.toFixed(4);
+          const tpFmt = pricePrecision.formatPrice(pos.takeProfit);
           drawOrderOrBracketLine(
             pos.takeProfit,
             `TP (${pos.side.toUpperCase()}) @ $${tpFmt}`,
@@ -3807,7 +3872,7 @@ export function TradingViewContainer({
         }
 
         if (pos.stopLoss && pos.stopLoss > 0) {
-          const slFmt = pos.stopLoss >= 1 ? pos.stopLoss.toFixed(2) : pos.stopLoss.toFixed(4);
+          const slFmt = pricePrecision.formatPrice(pos.stopLoss);
           drawOrderOrBracketLine(
             pos.stopLoss,
             `SL (${pos.side.toUpperCase()}) @ $${slFmt}`,
@@ -3820,7 +3885,7 @@ export function TradingViewContainer({
       });
 
       symbolOrders.forEach((ord) => {
-        const limFmt = ord.limitPrice >= 1 ? ord.limitPrice.toFixed(2) : ord.limitPrice.toFixed(4);
+        const limFmt = pricePrecision.formatPrice(ord.limitPrice);
         drawOrderOrBracketLine(
           ord.limitPrice,
           `LIMIT ${ord.side.toUpperCase()} ${ord.leverage}x @ $${limFmt}`,
@@ -4429,7 +4494,7 @@ export function TradingViewContainer({
           };
           saveDrawings([...drawingsRef.current, newDrawing]);
           setSelectedDrawingId(newDrawing.id);
-          flashToast(`Horizontal line @ ${anchor.price.toFixed(anchor.price >= 1 ? 2 : 6)}`);
+          flashToast(`Horizontal line @ ${pricePrecision.formatPrice(anchor.price)}`);
           return;
         }
         case "create_alert": {
@@ -5535,18 +5600,18 @@ export function TradingViewContainer({
           {displayBar && (
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-muted">
-                O <span className="text-on-surface">{displayBar.open.toFixed(2)}</span>
+                O <span className="text-on-surface">{pricePrecision.formatPrice(displayBar.open)}</span>
               </span>
               <span className="text-muted">
-                H <span className="text-secondary">{displayBar.high.toFixed(2)}</span>
+                H <span className="text-secondary">{pricePrecision.formatPrice(displayBar.high)}</span>
               </span>
               <span className="text-muted">
-                L <span className="text-tertiary">{displayBar.low.toFixed(2)}</span>
+                L <span className="text-tertiary">{pricePrecision.formatPrice(displayBar.low)}</span>
               </span>
               <span className="text-muted">
                 C{" "}
                 <span className="text-on-surface font-semibold">
-                  {displayBar.close.toFixed(2)}
+                  {pricePrecision.formatPrice(displayBar.close)}
                 </span>
               </span>
             </div>
@@ -5561,7 +5626,7 @@ export function TradingViewContainer({
                   <span>EMA 20</span>
                   <span className="text-on-surface">
                     {displayEma20 !== null && displayEma20 !== undefined
-                      ? displayEma20.toFixed(2)
+                      ? pricePrecision.formatPrice(displayEma20)
                       : "—"}
                   </span>
                 </div>
@@ -5571,7 +5636,7 @@ export function TradingViewContainer({
                   <span>EMA 50</span>
                   <span className="text-on-surface">
                     {displayEma50 !== null && displayEma50 !== undefined
-                      ? displayEma50.toFixed(2)
+                      ? pricePrecision.formatPrice(displayEma50)
                       : "—"}
                   </span>
                 </div>
@@ -5581,7 +5646,7 @@ export function TradingViewContainer({
                   <span>EMA 100</span>
                   <span className="text-on-surface">
                     {displayEma100 !== null && displayEma100 !== undefined
-                      ? displayEma100.toFixed(2)
+                      ? pricePrecision.formatPrice(displayEma100)
                       : "—"}
                   </span>
                 </div>
@@ -5591,7 +5656,7 @@ export function TradingViewContainer({
                   <span>EMA 200</span>
                   <span className="text-on-surface">
                     {displayEma200 !== null && displayEma200 !== undefined
-                      ? displayEma200.toFixed(2)
+                      ? pricePrecision.formatPrice(displayEma200)
                       : "—"}
                   </span>
                 </div>
@@ -5605,7 +5670,7 @@ export function TradingViewContainer({
                   <span>BB Up</span>
                   <span className="text-on-surface">
                     {displayBbUpper !== null && displayBbUpper !== undefined
-                      ? displayBbUpper.toFixed(2)
+                      ? pricePrecision.formatPrice(displayBbUpper)
                       : "—"}
                   </span>
                 </div>
@@ -5615,7 +5680,7 @@ export function TradingViewContainer({
                   <span>BB Mid</span>
                   <span className="text-on-surface">
                     {displayBbMiddle !== null && displayBbMiddle !== undefined
-                      ? displayBbMiddle.toFixed(2)
+                      ? pricePrecision.formatPrice(displayBbMiddle)
                       : "—"}
                   </span>
                 </div>
@@ -5625,7 +5690,7 @@ export function TradingViewContainer({
                   <span>BB Low</span>
                   <span className="text-on-surface">
                     {displayBbLower !== null && displayBbLower !== undefined
-                      ? displayBbLower.toFixed(2)
+                      ? pricePrecision.formatPrice(displayBbLower)
                       : "—"}
                   </span>
                 </div>
@@ -6131,13 +6196,13 @@ export function TradingViewContainer({
                   {vpvrHudProfile && (
                     <>
                       <span className="text-gold font-semibold">
-                        POC ${vpvrHudProfile.pocPrice >= 1 ? vpvrHudProfile.pocPrice.toFixed(2) : vpvrHudProfile.pocPrice.toFixed(4)}
+                        POC ${pricePrecision.formatPrice(vpvrHudProfile.pocPrice)}
                       </span>
                       <span className="text-[#2962ff]">
-                        VAH ${vpvrHudProfile.vahPrice >= 1 ? vpvrHudProfile.vahPrice.toFixed(2) : vpvrHudProfile.vahPrice.toFixed(4)}
+                        VAH ${pricePrecision.formatPrice(vpvrHudProfile.vahPrice)}
                       </span>
                       <span className="text-[#2962ff]">
-                        VAL ${vpvrHudProfile.valPrice >= 1 ? vpvrHudProfile.valPrice.toFixed(2) : vpvrHudProfile.valPrice.toFixed(4)}
+                        VAL ${pricePrecision.formatPrice(vpvrHudProfile.valPrice)}
                       </span>
                     </>
                   )}
