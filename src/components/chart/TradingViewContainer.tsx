@@ -7,7 +7,7 @@ import { mexcWsManager } from "@/lib/mexc/websocket";
 import { replayEngine, ReplayState } from "@/lib/replay/replay-engine";
 import { Bar } from "@/types/tradingview";
 import { ta } from "@/lib/indicators/ta-math";
-import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, EyeOff, BarChart2, Play, RefreshCw, RotateCcw } from "lucide-react";
+import { Activity, ShieldCheck, Layers, Settings, X, Trash2, Lock, Unlock, Settings2, BellPlus, Copy, Eye, EyeOff, BarChart2, Play, RefreshCw, RotateCcw } from "lucide-react";
 import { DrawingToolType } from "../terminal/DrawingRail";
 import { BacktestPerformance, BacktestTrade } from "@/lib/strategy/types";
 import { PriceAlert, createAlertsFromDrawing } from "@/lib/alerts/alerts-engine";
@@ -264,6 +264,7 @@ export function TradingViewContainer({
   const [replayState, setReplayState] = useState<ReplayState>("IDLE");
   const [feedMode, setFeedMode] = useState<"ws" | "polling">("polling");
   const lastWsTickTimeRef = useRef<number>(0);
+  const [isCustomIndicatorHidden, setIsCustomIndicatorHidden] = useState(false);
 
   // Geometric drawing tools state (DEC-040 to DEC-049)
   const [drawings, setDrawings] = useState<ChartDrawing[]>([]);
@@ -1540,7 +1541,17 @@ export function TradingViewContainer({
         console.error("Failed to render custom indicator series", err);
       }
     }
+    setIsCustomIndicatorHidden(false);
   }, [customIndicatorData]);
+
+  // Synchronize custom indicator series visibility when toggled via HUD (DEC-095)
+  useEffect(() => {
+    if (customIndicatorSeriesRef.current) {
+      try {
+        customIndicatorSeriesRef.current.applyOptions({ visible: !isCustomIndicatorHidden });
+      } catch {}
+    }
+  }, [isCustomIndicatorHidden]);
 
   // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
   const DRAWING_COLORS = [
@@ -1689,7 +1700,20 @@ export function TradingViewContainer({
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          loaded = parsed;
+          // Filter out any legacy script-generated boxes (DEC-095)
+          loaded = parsed.filter(
+            (d: any) =>
+              !(
+                typeof d.id === "string" &&
+                (d.id.startsWith("box_") || d.id.startsWith("custom-box-")) &&
+                (d.name?.includes("Zone") || d.name?.includes("Script Box") || d.name?.includes("Order Block"))
+              )
+          );
+          if (loaded.length !== parsed.length) {
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(loaded));
+            } catch {}
+          }
         }
       }
     } catch {}
@@ -1928,58 +1952,15 @@ export function TradingViewContainer({
       setInFlightDrawing(null);
       setDrawingStep(0);
     };
-    const handleAddScriptDrawings = (e: Event) => {
-      if (!isActivePane) return;
-      const detail = (e as CustomEvent<{ boxes: any[] }>).detail;
-      if (!detail || !detail.boxes || !Array.isArray(detail.boxes)) return;
-      const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
-      const newDrawings: ChartDrawing[] = detail.boxes.map((box, bIdx) => ({
-        id: box.id || `box_${Date.now()}_${bIdx}`,
-        name: box.label || (box.type ? `${box.type} Zone` : `Script Box ${bIdx + 1}`),
-        type: "rectangle",
-        startTime: box.startTime,
-        startPrice: box.top !== undefined ? box.top : (box.startPrice ?? 0),
-        endTime: box.endTime || latestBarTime,
-        endPrice: box.bottom !== undefined ? box.bottom : (box.endPrice ?? 0),
-        color: box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
-        fillColor: box.fillColor || box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
-        fillOpacity: box.fillOpacity !== undefined ? box.fillOpacity : 0.2,
-        lineWidth: box.lineWidth || 1,
-        lineStyle: box.lineStyle || "solid",
-        showMidLine: box.showMidLine !== undefined ? box.showMidLine : true,
-        midLineColor: box.midLineColor || box.color || (box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff"),
-        midLineStyle: box.midLineStyle || "dashed",
-        extendRight: !!box.extendRight,
-        text: box.label || (box.type ? `${box.type} Zone` : ""),
-        fontSize: 10,
-        textAlign: "right",
-        textVAlign: "top",
-      }));
-      if (newDrawings.length > 0) {
-        const existingIds = new Set(drawingsRef.current.map((d) => d.id));
-        const filteredNew = newDrawings.filter((d) => !existingIds.has(d.id));
-        const updated = [
-          ...drawingsRef.current.map((d) => {
-            const match = newDrawings.find((nd) => nd.id === d.id);
-            return match || d;
-          }),
-          ...filteredNew,
-        ];
-        saveDrawings(updated);
-        setSelectedDrawingId(newDrawings[0].id);
-      }
-    };
     window.addEventListener("mochex:clear-drawings", handleClearDrawings);
-    window.addEventListener("mochex:add-script-drawings", handleAddScriptDrawings);
     window.addEventListener("mochex:undo", handleUndo);
     window.addEventListener("mochex:redo", handleRedo);
     return () => {
       window.removeEventListener("mochex:clear-drawings", handleClearDrawings);
-      window.removeEventListener("mochex:add-script-drawings", handleAddScriptDrawings);
       window.removeEventListener("mochex:undo", handleUndo);
       window.removeEventListener("mochex:redo", handleRedo);
     };
-  }, [isActivePane, saveDrawings, handleUndo, handleRedo]);
+  }, [saveDrawings, handleUndo, handleRedo]);
 
   // Specialized Geometric Renderers (DEC-041, DEC-046, DEC-047)
   const renderTrendline = useCallback(
@@ -3511,38 +3492,47 @@ export function TradingViewContainer({
       });
     }
 
-    // Render Custom Script Boxes (DEC-082)
-    if (customScriptBoxes && customScriptBoxes.length > 0 && !isDrawingsHidden) {
+    // Render Static Custom Script Boxes (DEC-082, DEC-095)
+    if (customScriptBoxes && customScriptBoxes.length > 0 && !isDrawingsHidden && !isCustomIndicatorHidden) {
       const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
       customScriptBoxes.forEach((box, bIdx) => {
         const x1 = getSafeScreenX(box.startTime);
-        const y1 = getSafeScreenY(box.top);
-        const y2 = getSafeScreenY(box.bottom);
+        const y1 = getSafeScreenY(box.top !== undefined ? box.top : (box.startPrice ?? 0));
+        const y2 = getSafeScreenY(box.bottom !== undefined ? box.bottom : (box.endPrice ?? 0));
 
         if (x1 !== null && y1 !== null && y2 !== null) {
-          const x2 = box.endTime ? (getSafeScreenX(box.endTime) || rect.width) : (getSafeScreenX(latestBarTime) || rect.width);
+          const defaultColor =
+            box.type === "BULLISH" ? "#00c087" : box.type === "BEARISH" ? "#ff3b30" : "#00d8ff";
+          const boxColor = box.color || defaultColor;
+          const x2 = box.extendRight
+            ? rect.width
+            : box.endTime
+            ? getSafeScreenX(box.endTime) || rect.width
+            : getSafeScreenX(latestBarTime) || rect.width;
+
           renderRectangle(
             ctx,
             x1,
             y1,
-            Math.max(x1 + 30, x2),
+            Math.max(x1 + 20, x2),
             y2,
             {
               id: box.id || `custom-box-${bIdx}`,
               type: "rectangle",
               startTime: box.startTime,
-              startPrice: box.top,
+              startPrice: box.top !== undefined ? box.top : (box.startPrice ?? 0),
               endTime: box.endTime || latestBarTime,
-              endPrice: box.bottom,
-              color: box.color || "#00d8ff",
-              fillColor: box.fillColor || box.color || "#00d8ff",
-              fillOpacity: 0.18,
-              lineWidth: 1,
+              endPrice: box.bottom !== undefined ? box.bottom : (box.endPrice ?? 0),
+              color: boxColor,
+              fillColor: box.fillColor || boxColor,
+              fillOpacity: box.fillOpacity !== undefined ? box.fillOpacity : 0.18,
+              lineWidth: box.lineWidth || 1,
+              lineStyle: box.lineStyle || "solid",
               showMidLine: box.showMidLine !== undefined ? box.showMidLine : true,
-              midLineColor: box.color || "#00d8ff",
-              midLineStyle: "dashed",
-              extendRight: false,
-              text: box.label || "",
+              midLineColor: box.midLineColor || boxColor,
+              midLineStyle: box.midLineStyle || "dashed",
+              extendRight: !!box.extendRight,
+              text: box.label || (box.type ? `${box.type} Zone` : ""),
               fontSize: 10,
               textAlign: "right",
               textVAlign: "top",
@@ -5582,11 +5572,35 @@ export function TradingViewContainer({
             </div>
 
             {customIndicatorData && (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-primary-container/15 text-primary border border-primary/30">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+              <div
+                className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${
+                  isCustomIndicatorHidden
+                    ? "bg-surface-container-low text-muted border-outline-variant/30 opacity-70"
+                    : "bg-primary-container/15 text-primary border-primary/30"
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isCustomIndicatorHidden ? "bg-muted" : "bg-primary animate-pulse"
+                  }`}
+                />
                 <span className="font-semibold">{customIndicatorData.name}</span>
+                {customScriptBoxes && customScriptBoxes.length > 0 && (
+                  <span className="text-[10px] text-muted font-normal">
+                    ({customScriptBoxes.length} {customScriptBoxes.length === 1 ? "zone" : "zones"})
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsCustomIndicatorHidden((prev) => !prev)}
+                  title={isCustomIndicatorHidden ? "Show custom indicator" : "Hide custom indicator"}
+                  className="text-muted hover:text-on-surface ml-0.5 cursor-pointer"
+                >
+                  {isCustomIndicatorHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+                </button>
                 {onClearCustomIndicator && (
                   <button
+                    type="button"
                     onClick={onClearCustomIndicator}
                     title="Remove custom indicator from chart"
                     className="text-muted hover:text-tertiary ml-0.5 cursor-pointer"

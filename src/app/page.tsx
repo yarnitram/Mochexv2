@@ -833,17 +833,15 @@ export default function WorkstationPage() {
               handleApplyIndicator(name);
               if (data && data.length > 0) {
                 setCustomIndicatorData({ name, data, color: "#00d8ff" });
+              } else if (boxes && boxes.length > 0) {
+                setCustomIndicatorData({ name, data: [], color: "#00d8ff" });
               } else {
                 setCustomIndicatorData(null);
               }
               if (boxes && boxes.length > 0) {
-                if (typeof window !== "undefined") {
-                  window.dispatchEvent(
-                    new CustomEvent("mochex:add-script-drawings", {
-                      detail: { boxes },
-                    })
-                  );
-                }
+                setCustomIndicatorBoxes(boxes);
+              } else {
+                setCustomIndicatorBoxes(null);
               }
               // Keep studio dock open so user can inspect or iterate
             }}
