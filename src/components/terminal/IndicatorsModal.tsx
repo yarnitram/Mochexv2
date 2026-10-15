@@ -37,6 +37,8 @@ import {
   DEFAULT_MACD_SCRIPT,
   resolveCatalogScriptCode,
 } from "@/lib/indicators/custom-scripts-store";
+import { IndicatorSandbox } from "@/lib/indicators/sandbox";
+import { CandlestickBar } from "@/lib/mexc/types";
 
 export interface IndicatorCatalogItem {
   id: string;
@@ -146,6 +148,13 @@ interface IndicatorsModalProps {
   onEditInStudio?: (indicator: IndicatorCatalogItem) => void;
   activeIndicators?: string[];
   initialTab?: "catalog" | "templates";
+  sampleBars?: CandlestickBar[];
+  onApplyCustomScript?: (script: {
+    name: string;
+    code: string;
+    data?: Array<{ time: number; value: number }>;
+    boxes?: any[];
+  }) => void;
 }
 
 export function IndicatorsModal({
@@ -156,6 +165,8 @@ export function IndicatorsModal({
   onEditInStudio,
   activeIndicators = [],
   initialTab = "catalog",
+  sampleBars = [],
+  onApplyCustomScript,
 }: IndicatorsModalProps) {
   const [mainTab, setMainTab] = useState<"catalog" | "templates">("catalog");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
@@ -250,6 +261,75 @@ export function IndicatorsModal({
       );
     }
     onClose();
+  };
+
+  const handleItemApply = async (item: IndicatorCatalogItem) => {
+    const resolvedCode = item.code || resolveCatalogScriptCode(item.id, item.name);
+    const isCustomScript = item.category === "custom" || !!item.code || !!resolvedCode;
+    const isCurrentlyActive = activeIndicators.includes(item.name);
+
+    if (isCustomScript && resolvedCode) {
+      if (isCurrentlyActive) {
+        onApplyIndicator(item.name);
+        if (onApplyCustomScript) {
+          onApplyCustomScript({ name: item.name, code: resolvedCode, data: undefined, boxes: undefined });
+        }
+        return;
+      }
+
+      try {
+        const sandbox = new IndicatorSandbox(1500);
+        const fallbackBars = sampleBars && sampleBars.length > 0 ? sampleBars : [
+          { time: Date.now() - 3600000, open: 68000, high: 68500, low: 67900, close: 68420, volume: 100 },
+          { time: Date.now() - 1800000, open: 68420, high: 68600, low: 68300, close: 68550, volume: 120 },
+          { time: Date.now(), open: 68550, high: 68700, low: 68400, close: 68600, volume: 150 },
+        ];
+        const res = await sandbox.execute({
+          scriptId: item.id,
+          code: resolvedCode,
+          bars: fallbackBars,
+          inputs: {},
+        });
+
+        if (res.success) {
+          let points: Array<{ time: number; value: number }> | null = null;
+          if (Array.isArray(res.data)) {
+            points = (res.data as any[])
+              .filter(
+                (d) =>
+                  d &&
+                  d.time !== undefined &&
+                  d.value !== null &&
+                  d.value !== undefined &&
+                  typeof Number(d.value) === "number" &&
+                  !isNaN(Number(d.value))
+              )
+              .map((d) => ({
+                time: typeof d.time === "number" ? d.time : Number(d.time),
+                value: Number(d.value),
+              }));
+          }
+          const boxes = Array.isArray(res.boxes) && res.boxes.length > 0 ? res.boxes : null;
+          if (onApplyCustomScript) {
+            onApplyCustomScript({
+              name: item.name,
+              code: resolvedCode,
+              data: points && points.length > 0 ? points : undefined,
+              boxes: boxes || undefined,
+            });
+          }
+          onApplyIndicator(item.name);
+        } else {
+          if (onEditInStudio) {
+            onEditInStudio({ ...item, code: resolvedCode });
+          }
+        }
+      } catch {
+        onApplyIndicator(item.name);
+      }
+    } else {
+      onApplyIndicator(item.name);
+    }
   };
 
   if (!isOpen) return null;
@@ -523,7 +603,7 @@ export function IndicatorsModal({
                           )}
 
                           <button
-                            onClick={() => onApplyIndicator(item.name)}
+                            onClick={() => handleItemApply(item)}
                             className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono font-medium transition-colors cursor-pointer ${
                               isApplied
                                 ? "bg-secondary/20 text-secondary border border-secondary/40"

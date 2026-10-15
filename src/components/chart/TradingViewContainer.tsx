@@ -92,7 +92,9 @@ interface TradingViewContainerProps {
   isDrawingsLocked?: boolean;
   isDrawingsHidden?: boolean;
   activeIndicators?: string[];
+  hiddenIndicators?: string[];
   onToggleIndicator?: (name: string) => void;
+  onToggleIndicatorVisibility?: (name: string) => void;
   trades?: BacktestTrade[];
   strategyResult?: BacktestPerformance | null;
   strategyName?: string;
@@ -159,7 +161,9 @@ export function TradingViewContainer({
   isDrawingsLocked = false,
   isDrawingsHidden = false,
   activeIndicators = ["EMA Ribbon Momentum Multi-Timeframe"],
+  hiddenIndicators = [],
   onToggleIndicator,
+  onToggleIndicatorVisibility,
   trades = [],
   strategyResult = null,
   strategyName = "Pine Strategy",
@@ -1201,13 +1205,23 @@ export function TradingViewContainer({
     if (!chart) return;
 
     // 5.1 Main Pane 0 Overlays (EMA & Bollinger)
+    const isEmaHidden =
+      hiddenIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
+      hiddenIndicators.some((ind) => ind.toLowerCase().includes("ema"));
+
     const hasRibbonOrEma =
-      activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
-      activeIndicators.some((ind) => ind.toLowerCase().includes("ema"));
+      (activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
+        activeIndicators.some((ind) => ind.toLowerCase().includes("ema"))) &&
+      !isEmaHidden;
+
+    const isBollingerHidden =
+      hiddenIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+      hiddenIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
 
     const hasBollinger =
-      activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
-      activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
+      (activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+        activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"))) &&
+      !isBollingerHidden;
 
     ema20SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
     ema50SeriesRef.current?.applyOptions({ visible: hasRibbonOrEma });
@@ -1218,13 +1232,23 @@ export function TradingViewContainer({
     bbLowerSeriesRef.current?.applyOptions({ visible: hasBollinger });
 
     // 5.2 Dynamic Sub-Pane Allocations
+    const isRsiHidden =
+      hiddenIndicators.includes("RSI Divergence Engine Pro") ||
+      hiddenIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
+
     const hasRsi =
-      activeIndicators.includes("RSI Divergence Engine Pro") ||
-      activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
+      (activeIndicators.includes("RSI Divergence Engine Pro") ||
+        activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"))) &&
+      !isRsiHidden;
+
+    const isMacdHidden =
+      hiddenIndicators.includes("Zero-Lag MACD Histogram") ||
+      hiddenIndicators.some((ind) => ind.toLowerCase().includes("macd"));
 
     const hasMacd =
-      activeIndicators.includes("Zero-Lag MACD Histogram") ||
-      activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
+      (activeIndicators.includes("Zero-Lag MACD Histogram") ||
+        activeIndicators.some((ind) => ind.toLowerCase().includes("macd"))) &&
+      !isMacdHidden;
 
     const hasStrategySubPane = Boolean(
       strategyResult &&
@@ -1482,6 +1506,7 @@ export function TradingViewContainer({
     }
   }, [
     activeIndicators,
+    hiddenIndicators,
     rsiPeriod,
     rsiOverbought,
     rsiOversold,
@@ -1544,14 +1569,19 @@ export function TradingViewContainer({
     setIsCustomIndicatorHidden(false);
   }, [customIndicatorData]);
 
-  // Synchronize custom indicator series visibility when toggled via HUD (DEC-095)
+  // Synchronize custom indicator series visibility when toggled via HUD or Objects tab (DEC-095/DEC-096)
   useEffect(() => {
     if (customIndicatorSeriesRef.current) {
       try {
-        customIndicatorSeriesRef.current.applyOptions({ visible: !isCustomIndicatorHidden });
+        const isCustomNamedHidden = customIndicatorData?.name
+          ? hiddenIndicators.includes(customIndicatorData.name)
+          : false;
+        customIndicatorSeriesRef.current.applyOptions({
+          visible: !isCustomIndicatorHidden && !isCustomNamedHidden,
+        });
       } catch {}
     }
-  }, [isCustomIndicatorHidden]);
+  }, [isCustomIndicatorHidden, hiddenIndicators, customIndicatorData]);
 
   // 6. Geometric Drawing Engine (DEC-040 to DEC-044)
   const DRAWING_COLORS = [
@@ -3327,11 +3357,17 @@ export function TradingViewContainer({
     ctx.clearRect(0, 0, rect.width, rect.height);
 
     // 0. Render Visible Range Volume Profile (VPVR) if enabled (DEC-071)
-    const showVpvr = activeIndicators.some(
+    const isVpvrHidden = hiddenIndicators.some(
       (ind) =>
         ind.toLowerCase().includes("volume profile") ||
         ind.toLowerCase().includes("poc")
     );
+    const showVpvr =
+      activeIndicators.some(
+        (ind) =>
+          ind.toLowerCase().includes("volume profile") ||
+          ind.toLowerCase().includes("poc")
+      ) && !isVpvrHidden;
     if (showVpvr && barsRef.current.length > 0) {
       let visibleBars = barsRef.current;
       try {
@@ -3492,8 +3528,17 @@ export function TradingViewContainer({
       });
     }
 
-    // Render Static Custom Script Boxes (DEC-082, DEC-095)
-    if (customScriptBoxes && customScriptBoxes.length > 0 && !isDrawingsHidden && !isCustomIndicatorHidden) {
+    // Render Static Custom Script Boxes (DEC-082, DEC-095, DEC-096)
+    const isCustomNamedHidden = customIndicatorData?.name
+      ? hiddenIndicators.includes(customIndicatorData.name)
+      : false;
+    if (
+      customScriptBoxes &&
+      customScriptBoxes.length > 0 &&
+      !isDrawingsHidden &&
+      !isCustomIndicatorHidden &&
+      !isCustomNamedHidden
+    ) {
       const latestBarTime = barsRef.current[barsRef.current.length - 1]?.time || Date.now();
       customScriptBoxes.forEach((box, bIdx) => {
         const x1 = getSafeScreenX(box.startTime);
@@ -4093,6 +4138,7 @@ export function TradingViewContainer({
     currentPrice,
     replayState,
     activeIndicators,
+    hiddenIndicators,
     vpvrRows,
     vpvrVaPercent,
     trades,
@@ -5338,37 +5384,63 @@ export function TradingViewContainer({
   const displayMacdHist = hoveredStats?.macdHist ?? latestMacdObj?.histogram;
   const displayVol = hoveredStats?.volume ?? lastBar?.volume;
 
+  const isEmaHidden =
+    hiddenIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("ema"));
   const hasRibbonOrEma =
-    activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
-    activeIndicators.some((ind) => ind.toLowerCase().includes("ema"));
+    (activeIndicators.includes("EMA Ribbon Momentum Multi-Timeframe") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("ema"))) &&
+    !isEmaHidden;
 
+  const isBollingerHidden =
+    hiddenIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
   const hasBollinger =
-    activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
-    activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"));
+    (activeIndicators.includes("Bollinger Bands Squeeze Breakout") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("bollinger"))) &&
+    !isBollingerHidden;
 
+  const isRsiHidden =
+    hiddenIndicators.includes("RSI Divergence Engine Pro") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
   const hasRsi =
-    activeIndicators.includes("RSI Divergence Engine Pro") ||
-    activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"));
+    (activeIndicators.includes("RSI Divergence Engine Pro") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("rsi"))) &&
+    !isRsiHidden;
 
+  const isMacdHidden =
+    hiddenIndicators.includes("Zero-Lag MACD Histogram") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("macd"));
   const hasMacd =
-    activeIndicators.includes("Zero-Lag MACD Histogram") ||
-    activeIndicators.some((ind) => ind.toLowerCase().includes("macd"));
+    (activeIndicators.includes("Zero-Lag MACD Histogram") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("macd"))) &&
+    !isMacdHidden;
 
+  const isVolumeProfileHidden = hiddenIndicators.some(
+    (ind) =>
+      ind.toLowerCase().includes("volume profile") ||
+      ind.toLowerCase().includes("poc")
+  );
   const hasVolumeProfile =
-    activeIndicators.includes("Volume Profile & Dynamic Point of Control (POC)") ||
-    activeIndicators.some(
-      (ind) =>
-        ind.toLowerCase().includes("volume profile") ||
-        ind.toLowerCase().includes("poc")
-    );
+    (activeIndicators.includes("Volume Profile & Dynamic Point of Control (POC)") ||
+      activeIndicators.some(
+        (ind) =>
+          ind.toLowerCase().includes("volume profile") ||
+          ind.toLowerCase().includes("poc")
+      )) &&
+    !isVolumeProfileHidden;
 
   const vpvrHudProfile = hasVolumeProfile
     ? calculateVisibleVolumeProfile(bars, vpvrRows, vpvrVaPercent / 100)
     : null;
 
+  const isFvgHidden =
+    hiddenIndicators.includes("Unmitigated Multi-Timeframe FVG (0% Hit)") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("fvg"));
   const hasFvgIndicator =
-    activeIndicators.includes("Unmitigated Multi-Timeframe FVG (0% Hit)") ||
-    activeIndicators.some((ind) => ind.toLowerCase().includes("fvg"));
+    (activeIndicators.includes("Unmitigated Multi-Timeframe FVG (0% Hit)") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("fvg"))) &&
+    !isFvgHidden;
 
   const activeFvgZones = useMemo(() => {
     if (!hasFvgIndicator) return [];
@@ -5571,45 +5643,58 @@ export function TradingViewContainer({
               </span>
             </div>
 
-            {customIndicatorData && (
-              <div
-                className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${
-                  isCustomIndicatorHidden
-                    ? "bg-surface-container-low text-muted border-outline-variant/30 opacity-70"
-                    : "bg-primary-container/15 text-primary border-primary/30"
-                }`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    isCustomIndicatorHidden ? "bg-muted" : "bg-primary animate-pulse"
+            {customIndicatorData && (() => {
+              const isNamedHidden = customIndicatorData.name
+                ? hiddenIndicators.includes(customIndicatorData.name)
+                : false;
+              const isEffectivelyHidden = isCustomIndicatorHidden || isNamedHidden;
+              return (
+                <div
+                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded border transition-colors ${
+                    isEffectivelyHidden
+                      ? "bg-surface-container-low text-muted border-outline-variant/30 opacity-70"
+                      : "bg-primary-container/15 text-primary border-primary/30"
                   }`}
-                />
-                <span className="font-semibold">{customIndicatorData.name}</span>
-                {customScriptBoxes && customScriptBoxes.length > 0 && (
-                  <span className="text-[10px] text-muted font-normal">
-                    ({customScriptBoxes.length} {customScriptBoxes.length === 1 ? "zone" : "zones"})
-                  </span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setIsCustomIndicatorHidden((prev) => !prev)}
-                  title={isCustomIndicatorHidden ? "Show custom indicator" : "Hide custom indicator"}
-                  className="text-muted hover:text-on-surface ml-0.5 cursor-pointer"
                 >
-                  {isCustomIndicatorHidden ? <EyeOff size={11} /> : <Eye size={11} />}
-                </button>
-                {onClearCustomIndicator && (
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isEffectivelyHidden ? "bg-muted" : "bg-primary animate-pulse"
+                    }`}
+                  />
+                  <span className={`font-semibold ${isEffectivelyHidden ? "line-through text-muted" : ""}`}>
+                    {customIndicatorData.name}
+                  </span>
+                  {customScriptBoxes && customScriptBoxes.length > 0 && (
+                    <span className="text-[10px] text-muted font-normal">
+                      ({customScriptBoxes.length} {customScriptBoxes.length === 1 ? "zone" : "zones"})
+                    </span>
+                  )}
                   <button
                     type="button"
-                    onClick={onClearCustomIndicator}
-                    title="Remove custom indicator from chart"
-                    className="text-muted hover:text-tertiary ml-0.5 cursor-pointer"
+                    onClick={() => {
+                      setIsCustomIndicatorHidden((prev) => !prev);
+                      if (customIndicatorData.name && onToggleIndicatorVisibility) {
+                        onToggleIndicatorVisibility(customIndicatorData.name);
+                      }
+                    }}
+                    title={isEffectivelyHidden ? "Show custom indicator" : "Hide custom indicator"}
+                    className="text-muted hover:text-on-surface ml-0.5 cursor-pointer"
                   >
-                    <X size={11} />
+                    {isEffectivelyHidden ? <EyeOff size={11} /> : <Eye size={11} />}
                   </button>
-                )}
-              </div>
-            )}
+                  {onClearCustomIndicator && (
+                    <button
+                      type="button"
+                      onClick={onClearCustomIndicator}
+                      title="Remove custom indicator from chart"
+                      className="text-muted hover:text-tertiary ml-0.5 cursor-pointer"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             {hasFvgIndicator && (
               <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container border border-outline-variant/30 text-[10px] font-mono">

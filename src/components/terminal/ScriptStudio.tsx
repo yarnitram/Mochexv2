@@ -50,6 +50,8 @@ interface ScriptStudioProps {
     data?: Array<{ time: number; value: number }>,
     boxes?: any[]
   ) => void;
+  onRemoveFromChart?: () => void;
+  activeIndicators?: string[];
   onStrategyResult?: (result: BacktestPerformance, name?: string) => void;
   onSelectTrade?: (trade: BacktestTrade) => void;
   initialScript?: CustomScript | null;
@@ -60,6 +62,8 @@ export function ScriptStudio({
   onClose,
   sampleBars,
   onApplyIndicator,
+  onRemoveFromChart,
+  activeIndicators,
   onStrategyResult,
   onSelectTrade,
   initialScript,
@@ -118,9 +122,19 @@ export function ScriptStudio({
     }
   }, [initialScript]);
 
+  // Ensure default view is collapsed / docked (not full screen size 82vh) when navigating to editor
+  useEffect(() => {
+    if (isOpen) {
+      setIsMaximized(false);
+      setIsExpanded(false);
+    }
+  }, [isOpen]);
+
   // Listen for external open-script events
   useEffect(() => {
     const handleOpenExternal = (e: any) => {
+      setIsMaximized(false);
+      setIsExpanded(false);
       if (e.detail?.script) {
         const s: CustomScript = e.detail.script;
         const resolvedCode = s.code || resolveCatalogScriptCode(s.id, s.name);
@@ -363,12 +377,32 @@ export function ScriptStudio({
     ]);
   };
 
+  const handleRemoveFromChart = () => {
+    if (onRemoveFromChart) {
+      onRemoveFromChart();
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("mochex:remove-active-script", {
+          detail: { name: scriptName },
+        })
+      );
+    }
+    setIsAddedRecently(false);
+    setLogs((prev) => [
+      `[CHART] Removed '${scriptName}' and overlays from chart.`,
+      ...prev.slice(0, 15),
+    ]);
+  };
+
   if (!isOpen) return null;
+
+  const isScriptActive = Boolean(activeIndicators && activeIndicators.includes(scriptName));
 
   return (
     <section
       className={`bg-surface-container-lowest border-t border-border flex flex-col select-none transition-all duration-200 z-20 overflow-hidden ${
-        isMaximized ? "h-[82vh]" : isExpanded ? "h-[520px]" : "h-76"
+        isMaximized ? "h-[82vh]" : isExpanded ? "h-[520px]" : "h-72"
       }`}
     >
       {/* Studio Header Ribbon - Fixed Sticky Top */}
@@ -561,12 +595,24 @@ export function ScriptStudio({
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors shadow-xs cursor-pointer ${
               isAddedRecently
                 ? "bg-secondary text-surface font-bold border border-secondary shadow-sm"
+                : isScriptActive
+                ? "bg-primary-container/85 hover:bg-accent-hover text-white"
                 : "bg-primary-container hover:bg-accent-hover text-white"
             }`}
             title="Save script and apply directly to chart workspace"
           >
             {isAddedRecently ? <Check size={13} /> : <Plus size={13} />}
-            <span>{isAddedRecently ? "Added to Chart!" : "Add to Chart"}</span>
+            <span>{isAddedRecently ? "Applied to Chart!" : isScriptActive ? "Update on Chart" : "Add to Chart"}</span>
+          </button>
+
+          {/* Remove from Chart */}
+          <button
+            onClick={handleRemoveFromChart}
+            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono font-medium text-tertiary hover:bg-tertiary/15 border border-tertiary/30 transition-colors cursor-pointer"
+            title="Remove active script and its overlays from chart"
+          >
+            <Trash2 size={12} />
+            <span className="hidden sm:inline">Remove from Chart</span>
           </button>
 
           {/* Set Alert */}

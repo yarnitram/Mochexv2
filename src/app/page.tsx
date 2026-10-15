@@ -96,6 +96,17 @@ export default function WorkstationPage() {
   const [activeIndicators, setActiveIndicators] = useState<string[]>([
     "EMA Ribbon Momentum Multi-Timeframe",
   ]);
+  const [hiddenIndicators, setHiddenIndicators] = useState<string[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("mochex:hidden_indicators");
+        return saved ? JSON.parse(saved) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
   const [favoriteTools, setFavoriteTools] = useState<DrawingToolType[]>([
     "trendline",
     "horizontal_line",
@@ -402,11 +413,48 @@ export default function WorkstationPage() {
     }
   };
 
-  const handleApplyIndicator = (name: string) => {
+  const handleClearCustomIndicator = (nameToClear?: string) => {
+    setCustomIndicatorData(null);
+    setCustomIndicatorBoxes(null);
     setActiveIndicators((prev) => {
-      const next = prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name];
+      const target = nameToClear || customIndicatorData?.name;
+      const next = target ? prev.filter((i) => i !== target) : prev;
       try {
         localStorage.setItem("mochex:active_indicators", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const handleRemoveActiveScript = (e: any) => {
+      handleClearCustomIndicator(e.detail?.name);
+    };
+    window.addEventListener("mochex:remove-active-script", handleRemoveActiveScript);
+    return () => window.removeEventListener("mochex:remove-active-script", handleRemoveActiveScript);
+  }, [customIndicatorData]);
+
+  const handleApplyIndicator = (name: string) => {
+    if (!name) return;
+    setActiveIndicators((prev) => {
+      const isRemoving = prev.includes(name);
+      const next = isRemoving ? prev.filter((i) => i !== name) : [...prev, name];
+      try {
+        localStorage.setItem("mochex:active_indicators", JSON.stringify(next));
+      } catch {}
+      if (isRemoving && customIndicatorData?.name === name) {
+        setCustomIndicatorData(null);
+        setCustomIndicatorBoxes(null);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleIndicatorVisibility = (name: string) => {
+    setHiddenIndicators((prev) => {
+      const next = prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name];
+      try {
+        localStorage.setItem("mochex:hidden_indicators", JSON.stringify(next));
       } catch {}
       return next;
     });
@@ -711,7 +759,9 @@ export default function WorkstationPage() {
                     isDrawingsLocked={isDrawingsLocked}
                     isDrawingsHidden={isDrawingsHidden}
                     activeIndicators={activeIndicators}
+                    hiddenIndicators={hiddenIndicators}
                     onToggleIndicator={handleApplyIndicator}
+                    onToggleIndicatorVisibility={handleToggleIndicatorVisibility}
                     trades={isPaneActive ? strategyResult?.trades || [] : []}
                     strategyResult={isPaneActive ? strategyResult : null}
                     strategyName={activeStrategyName}
@@ -819,6 +869,8 @@ export default function WorkstationPage() {
               } catch {}
             }}
             sampleBars={cachedBars}
+            activeIndicators={activeIndicators}
+            onRemoveFromChart={() => handleClearCustomIndicator()}
             onStrategyResult={(res, name) => {
               setStrategyResult(res);
               if (name) setActiveStrategyName(name);
@@ -858,7 +910,9 @@ export default function WorkstationPage() {
             currentPrice={marketStats.price}
             user={user}
             activeIndicators={activeIndicators}
+            hiddenIndicators={hiddenIndicators}
             onToggleIndicator={handleApplyIndicator}
+            onToggleIndicatorVisibility={handleToggleIndicatorVisibility}
           />
         </div>
       </div>
@@ -871,6 +925,21 @@ export default function WorkstationPage() {
         onApplyTemplate={handleApplyTemplate}
         activeIndicators={activeIndicators}
         initialTab={indicatorsModalTab}
+        sampleBars={cachedBars}
+        onApplyCustomScript={({ name, code, data, boxes }) => {
+          if (data && data.length > 0) {
+            setCustomIndicatorData({ name, data, color: "#00d8ff" });
+          } else if (boxes && boxes.length > 0) {
+            setCustomIndicatorData({ name, data: [], color: "#00d8ff" });
+          } else {
+            setCustomIndicatorData(null);
+          }
+          if (boxes && boxes.length > 0) {
+            setCustomIndicatorBoxes(boxes);
+          } else {
+            setCustomIndicatorBoxes(null);
+          }
+        }}
         onEditInStudio={(item) => {
           setIsStudioOpen(true);
           if (item) {

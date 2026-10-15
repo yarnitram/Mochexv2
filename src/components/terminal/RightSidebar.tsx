@@ -89,7 +89,9 @@ interface RightSidebarProps {
   currentPrice?: number;
   user?: AuthUser | null;
   activeIndicators?: string[];
+  hiddenIndicators?: string[];
   onToggleIndicator?: (name: string) => void;
+  onToggleIndicatorVisibility?: (name: string) => void;
 }
 
 interface TickerRow {
@@ -120,7 +122,9 @@ export function RightSidebar({
   currentPrice = 68420.5,
   user,
   activeIndicators = [],
+  hiddenIndicators = [],
   onToggleIndicator,
+  onToggleIndicatorVisibility,
 }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<"watchlist" | "trade" | "dom" | "alerts" | "objects" | "hot">("watchlist");
   const [searchQuery, setSearchQuery] = useState("");
@@ -1660,28 +1664,54 @@ export function RightSidebar({
                 </div>
               ) : (
                 <div className="divide-y divide-border/30">
-                  {activeIndicators.map((indName) => (
-                    <div
-                      key={indName}
-                      className="px-3 py-2 flex items-center justify-between gap-2 hover:bg-surface-container-low transition-colors"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="w-2 h-2 rounded-full bg-primary shrink-0" />
-                        <span className="text-xs font-semibold text-on-surface truncate">
-                          {indName}
-                        </span>
+                  {activeIndicators.map((indName) => {
+                    const isHidden = hiddenIndicators.includes(indName);
+                    return (
+                      <div
+                        key={indName}
+                        className="px-3 py-2 flex items-center justify-between gap-2 hover:bg-surface-container-low transition-colors"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              isHidden ? "bg-muted" : "bg-primary"
+                            }`}
+                          />
+                          <span
+                            className={`text-xs font-semibold truncate ${
+                              isHidden ? "line-through text-muted" : "text-on-surface"
+                            }`}
+                          >
+                            {indName}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          {onToggleIndicatorVisibility && (
+                            <button
+                              onClick={() => onToggleIndicatorVisibility(indName)}
+                              title={isHidden ? "Show Indicator" : "Hide Indicator"}
+                              className={`p-1 rounded cursor-pointer transition-colors ${
+                                isHidden
+                                  ? "text-tertiary bg-tertiary/10"
+                                  : "text-muted hover:text-on-surface hover:bg-surface"
+                              }`}
+                            >
+                              {isHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+                            </button>
+                          )}
+                          {onToggleIndicator && (
+                            <button
+                              onClick={() => onToggleIndicator(indName)}
+                              title="Remove Indicator"
+                              className="p-1 rounded text-muted hover:text-tertiary hover:bg-tertiary/10 transition-colors cursor-pointer"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      {onToggleIndicator && (
-                        <button
-                          onClick={() => onToggleIndicator(indName)}
-                          title="Remove Indicator"
-                          className="p-1 rounded text-muted hover:text-tertiary hover:bg-tertiary/10 transition-colors cursor-pointer shrink-0"
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
