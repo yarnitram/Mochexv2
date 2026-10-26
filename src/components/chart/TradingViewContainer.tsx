@@ -3760,20 +3760,37 @@ export function TradingViewContainer({
 
           // Draw HH / HL / LH / LL label badge if enabled
           if (marketStructureSettings.showSwingLabels && sw.tag) {
-            ctx.font = "bold 9px monospace";
-            ctx.textAlign = "center";
-            const textY = sw.type === "HIGH" ? sy - 7 : sy + 14;
+            const isTagEnabled =
+              (sw.tag === "HH" && marketStructureSettings.showHH) ||
+              (sw.tag === "HL" && marketStructureSettings.showHL) ||
+              (sw.tag === "LH" && marketStructureSettings.showLH) ||
+              (sw.tag === "LL" && marketStructureSettings.showLL);
 
-            // Background pill
-            const textWidth = ctx.measureText(sw.tag).width;
-            ctx.fillStyle = "rgba(23, 27, 38, 0.85)";
-            ctx.fillRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
-            ctx.strokeStyle = marketStructureSettings.majorColor;
-            ctx.lineWidth = 1;
-            ctx.strokeRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
+            if (isTagEnabled) {
+              const tagColor =
+                sw.tag === "HH"
+                  ? marketStructureSettings.hhColor || marketStructureSettings.bullishColor
+                  : sw.tag === "HL"
+                  ? marketStructureSettings.hlColor || marketStructureSettings.bullishColor
+                  : sw.tag === "LH"
+                  ? marketStructureSettings.lhColor || marketStructureSettings.bearishColor
+                  : marketStructureSettings.llColor || marketStructureSettings.bearishColor;
 
-            ctx.fillStyle = marketStructureSettings.majorColor;
-            ctx.fillText(sw.tag, sx, textY + 1);
+              ctx.font = "bold 9px monospace";
+              ctx.textAlign = "center";
+              const textY = sw.type === "HIGH" ? sy - 7 : sy + 14;
+
+              // Background pill
+              const textWidth = ctx.measureText(sw.tag).width;
+              ctx.fillStyle = "rgba(23, 27, 38, 0.85)";
+              ctx.fillRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
+              ctx.strokeStyle = tagColor;
+              ctx.lineWidth = 1;
+              ctx.strokeRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
+
+              ctx.fillStyle = tagColor;
+              ctx.fillText(sw.tag, sx, textY + 1);
+            }
           }
         });
       }
@@ -3787,9 +3804,13 @@ export function TradingViewContainer({
 
           if (x1 !== null && x2 !== null && y !== null) {
             const bColor =
-              b.direction === "BULLISH"
-                ? marketStructureSettings.bullishColor
-                : marketStructureSettings.bearishColor;
+              b.type === "BOS"
+                ? b.direction === "BULLISH"
+                  ? marketStructureSettings.bosBullishColor || marketStructureSettings.bullishColor
+                  : marketStructureSettings.bosBearishColor || marketStructureSettings.bearishColor
+                : b.direction === "BULLISH"
+                ? marketStructureSettings.chochBullishColor || marketStructureSettings.bullishColor
+                : marketStructureSettings.chochBearishColor || marketStructureSettings.bearishColor;
 
             // Dashed breakout level ray
             ctx.strokeStyle = bColor;
@@ -6002,6 +6023,54 @@ export function TradingViewContainer({
                 <span className="font-semibold text-on-surface">
                   Structure ({marketStructureSettings.majorLength}, {marketStructureSettings.subLength})
                 </span>
+                <div className="flex items-center gap-1 ml-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated = {
+                        ...marketStructureSettings,
+                        showMajor: !marketStructureSettings.showMajor,
+                      };
+                      saveMarketStructureSettings(updated);
+                      setMarketStructureSettings(updated);
+                    }}
+                    title={
+                      marketStructureSettings.showMajor
+                        ? "Hide True Market Structure (Major)"
+                        : "Show True Market Structure (Major)"
+                    }
+                    className={`px-1.5 py-0.2 rounded text-[9px] font-bold transition-all cursor-pointer ${
+                      marketStructureSettings.showMajor
+                        ? "bg-[#2962ff]/20 text-[#2962ff] border border-[#2962ff]/50"
+                        : "bg-surface-container-high text-muted/60 border border-border line-through"
+                    }`}
+                  >
+                    Major
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated = {
+                        ...marketStructureSettings,
+                        showSubstructure: !marketStructureSettings.showSubstructure,
+                      };
+                      saveMarketStructureSettings(updated);
+                      setMarketStructureSettings(updated);
+                    }}
+                    title={
+                      marketStructureSettings.showSubstructure
+                        ? "Hide Substructure"
+                        : "Show Substructure"
+                    }
+                    className={`px-1.5 py-0.2 rounded text-[9px] font-bold transition-all cursor-pointer ${
+                      marketStructureSettings.showSubstructure
+                        ? "bg-purple-500/20 text-purple-400 border border-purple-500/50"
+                        : "bg-surface-container-high text-muted/60 border border-border line-through"
+                    }`}
+                  >
+                    Sub
+                  </button>
+                </div>
                 {marketStructureResult && (
                   <span className="text-muted text-[9px]">
                     ({marketStructureResult.majorSwings.length}S · {marketStructureResult.breakouts.length}B)

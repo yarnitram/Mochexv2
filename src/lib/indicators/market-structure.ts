@@ -31,6 +31,10 @@ export interface MarketStructureSettings {
   showBOS: boolean;
   showCHOCH: boolean;
   showSwingLabels: boolean;
+  showHH: boolean;
+  showHL: boolean;
+  showLH: boolean;
+  showLL: boolean;
 
   // Style attributes
   majorColor: string;
@@ -43,6 +47,15 @@ export interface MarketStructureSettings {
 
   bullishColor: string;
   bearishColor: string;
+  bosBullishColor: string;
+  bosBearishColor: string;
+  chochBullishColor: string;
+  chochBearishColor: string;
+
+  hhColor: string;
+  hlColor: string;
+  lhColor: string;
+  llColor: string;
 }
 
 export const DEFAULT_MARKET_STRUCTURE_SETTINGS: MarketStructureSettings = {
@@ -54,6 +67,10 @@ export const DEFAULT_MARKET_STRUCTURE_SETTINGS: MarketStructureSettings = {
   showBOS: true,
   showCHOCH: true,
   showSwingLabels: true,
+  showHH: true,
+  showHL: true,
+  showLH: true,
+  showLL: true,
 
   majorColor: "#2962ff",
   majorLineWidth: 2,
@@ -65,6 +82,15 @@ export const DEFAULT_MARKET_STRUCTURE_SETTINGS: MarketStructureSettings = {
 
   bullishColor: "#089981",
   bearishColor: "#f23645",
+  bosBullishColor: "#089981",
+  bosBearishColor: "#f23645",
+  chochBullishColor: "#00e676",
+  chochBearishColor: "#ff5252",
+
+  hhColor: "#089981",
+  hlColor: "#26a69a",
+  lhColor: "#f23645",
+  llColor: "#ef5350",
 };
 
 export const MARKET_STRUCTURE_SETTINGS_STORAGE_KEY = "mochex:market_structure_settings";

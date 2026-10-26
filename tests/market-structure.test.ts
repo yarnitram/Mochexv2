@@ -224,4 +224,42 @@ describe("Market Structure Engine", () => {
     expect(rehydrated.majorLength).toBe(15);
     expect(rehydrated.majorColor).toBe("#00e676");
   });
+
+  it("supports granular toggles and custom colors for BOS, CHoCH, and HH/HL/LH/LL", () => {
+    const custom = saveMarketStructureSettings({
+      showMajor: false,
+      showSubstructure: true,
+      showBOS: false,
+      showCHOCH: true,
+      showHH: false,
+      showHL: true,
+      showLH: false,
+      showLL: true,
+      bosBullishColor: "#00d8ff",
+      bosBearishColor: "#ff7043",
+      chochBullishColor: "#a7ffeb",
+      chochBearishColor: "#ff80ab",
+      hhColor: "#76ff03",
+      hlColor: "#1de9b6",
+      lhColor: "#ff1744",
+      llColor: "#d50000",
+    });
+
+    expect(custom.showMajor).toBe(false);
+    expect(custom.showSubstructure).toBe(true);
+    expect(custom.showBOS).toBe(false);
+    expect(custom.showCHOCH).toBe(true);
+    expect(custom.showHH).toBe(false);
+    expect(custom.showHL).toBe(true);
+    expect(custom.showLH).toBe(false);
+    expect(custom.showLL).toBe(true);
+    expect(custom.bosBullishColor).toBe("#00d8ff");
+    expect(custom.hhColor).toBe("#76ff03");
+
+    const rehydrated = getStoredMarketStructureSettings();
+    expect(rehydrated.showMajor).toBe(false);
+    expect(rehydrated.showBOS).toBe(false);
+    expect(rehydrated.chochBullishColor).toBe("#a7ffeb");
+    expect(rehydrated.llColor).toBe("#d50000");
+  });
 });
