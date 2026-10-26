@@ -31,6 +31,7 @@ import {
   deleteCustomScript,
   DEFAULT_STARTER_SCRIPT,
   DEFAULT_FVG_SCRIPT,
+  DEFAULT_MARKET_STRUCTURE_SCRIPT,
   DEFAULT_EMA_RIBBON_SCRIPT,
   DEFAULT_BOLLINGER_SCRIPT,
   DEFAULT_RSI_SCRIPT,
@@ -54,6 +55,18 @@ export interface IndicatorCatalogItem {
 }
 
 const STATIC_CATALOG_ITEMS: IndicatorCatalogItem[] = [
+  {
+    id: "market-structure-substructure",
+    name: "True Market Structure & Substructure",
+    author: "Mochex Core",
+    category: "builtins",
+    type: "Overlay",
+    rating: 5.0,
+    usersCount: "28.4K",
+    description: "Institutional dual-lookback ZigZag market structure mapping Major Swings, Internal Substructure, Break of Structure (BOS), and Change of Character (CHoCH) with TradingView-style Settings Modal.",
+    isVerified: true,
+    code: DEFAULT_MARKET_STRUCTURE_SCRIPT,
+  },
   {
     id: "fvg-unmitigated",
     name: "Unmitigated Multi-Timeframe FVG (0% Hit)",

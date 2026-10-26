@@ -302,12 +302,18 @@ export function clampPositionEntryPrice(
   targetPrice: number,
   stopPrice: number,
   isLong: boolean,
-  bufferRatio: number = 0.01
+  bufferRatio: number = 0.01,
+  explicitMinBuffer?: number
 ): number {
   const minP = Math.min(targetPrice, stopPrice);
   const maxP = Math.max(targetPrice, stopPrice);
   const span = Math.abs(maxP - minP);
-  const buffer = span > 0 ? span * bufferRatio : 0.01;
+  const buffer =
+    explicitMinBuffer !== undefined && explicitMinBuffer > 0
+      ? explicitMinBuffer
+      : span > 0
+      ? span * bufferRatio
+      : 0.01;
 
   if (isLong) {
     const safeMin = stopPrice + buffer;
@@ -322,6 +328,52 @@ export function clampPositionEntryPrice(
       ? Math.max(safeMin, Math.min(safeMax, candidatePrice))
       : candidatePrice;
   }
+}
+
+/**
+ * Clamps target price so it remains on the correct side of entry with a dynamic tick-aware buffer (DEC-100).
+ */
+export function clampPositionTargetPrice(
+  candidatePrice: number,
+  entryPrice: number,
+  isLong: boolean,
+  minBuffer: number = 0.000001
+): number {
+  const safeBuffer = Math.max(1e-8, minBuffer);
+  return isLong
+    ? Math.max(entryPrice + safeBuffer, candidatePrice)
+    : Math.min(entryPrice - safeBuffer, candidatePrice);
+}
+
+/**
+ * Clamps stop price so it remains on the correct side of entry with a dynamic tick-aware buffer (DEC-100).
+ */
+export function clampPositionStopPrice(
+  candidatePrice: number,
+  entryPrice: number,
+  isLong: boolean,
+  minBuffer: number = 0.000001
+): number {
+  const safeBuffer = Math.max(1e-8, minBuffer);
+  return isLong
+    ? Math.min(entryPrice - safeBuffer, candidatePrice)
+    : Math.max(entryPrice + safeBuffer, candidatePrice);
+}
+
+/**
+ * Snaps a price to dynamic tick size (minMove) and rounds to precision decimals (DEC-100).
+ */
+export function quantizePrice(
+  price: number,
+  minMove: number = 0.01,
+  precision: number = 2
+): number {
+  if (minMove > 0) {
+    const steps = Math.round(price / minMove);
+    const quantized = steps * minMove;
+    return Number(quantized.toFixed(Math.max(0, precision)));
+  }
+  return Number(price.toFixed(Math.max(0, precision)));
 }
 
 export interface DateRangeMetrics {

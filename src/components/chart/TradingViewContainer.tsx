@@ -21,6 +21,13 @@ import {
 } from "@/lib/trading/paper-trading-engine";
 import { computeUnmitigatedFvgs, FvgZone } from "@/lib/indicators/fvg-engine";
 import {
+  computeMarketStructure,
+  MarketStructureSettings,
+  getStoredMarketStructureSettings,
+  saveMarketStructureSettings,
+} from "@/lib/indicators/market-structure";
+import { MarketStructureSettingsModal } from "./MarketStructureSettingsModal";
+import {
   ChartDrawing,
   calculateFibLevels,
   calculateTrendFibLevels,
@@ -28,6 +35,9 @@ import {
   calculatePositionMetrics,
   getPositionHandles,
   clampPositionEntryPrice,
+  clampPositionTargetPrice,
+  clampPositionStopPrice,
+  quantizePrice,
   calculateDateRangeMetrics,
   calculateRulerMetrics,
   getRectangleHandles,
@@ -311,6 +321,16 @@ export function TradingViewContainer({
   const [isDrawing, setIsDrawing] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const isDrawingMode = activeDrawingTool !== "none" && activeDrawingTool !== "crosshair";
+
+  // Market Structure & Substructure Settings State
+  const [marketStructureSettings, setMarketStructureSettings] = useState<MarketStructureSettings>(() => getStoredMarketStructureSettings());
+  const [isMarketStructureModalOpen, setIsMarketStructureModalOpen] = useState(false);
+
+  useEffect(() => {
+    const handleOpenSettings = () => setIsMarketStructureModalOpen(true);
+    window.addEventListener("mochex:open-market-structure-settings", handleOpenSettings);
+    return () => window.removeEventListener("mochex:open-market-structure-settings", handleOpenSettings);
+  }, []);
 
   // Undo / Redo History Engine Refs (DEC-068)
   const drawingsRef = useRef<ChartDrawing[]>([]);
@@ -3253,24 +3273,7 @@ export function TradingViewContainer({
           continue;
         }
 
-        if (x2 === null || y2 === null) continue;
-
-        // 4. Rectangle 8 handles hit testing (DEC-052, DEC-062)
-        if (d.type === "rectangle") {
-          const handles = getRectangleHandles(x1, y1, x2, y2);
-          for (const h of handles) {
-            if (Math.hypot(x - h.x, y - h.y) <= 9) {
-              return { drawing: d, handle: h.type };
-            }
-          }
-          const canvasW = drawingCanvasRef.current?.getBoundingClientRect().width || 2000;
-          if (isPointNearRectangle(x, y, x1, y1, x2, y2, !!d.extendRight, canvasW, 8)) {
-            return { drawing: d, handle: "body" as const };
-          }
-          continue;
-        }
-
-        // 5. Position tools handles (Target, Stop, Width) (DEC-054)
+        // 4. Position tools handles & edge lines (DEC-054, DEC-065, DEC-100)
         if (d.type === "long_position" || d.type === "short_position") {
           const isLong = d.type === "long_position";
           const targetPrice =
@@ -3287,11 +3290,13 @@ export function TradingViewContainer({
               : d.startPrice * 1.02;
           const yTarget = getSafeScreenY(targetPrice);
           const yStop = getSafeScreenY(stopPrice);
-          const leftX = Math.min(x1, x2);
-          const boxWidth = Math.max(80, Math.abs(x2 - x1));
+          const validX2 = x2 !== null ? x2 : x1 + 120;
+          const leftX = Math.min(x1, validX2);
+          const boxWidth = Math.max(80, Math.abs(validX2 - x1));
           const midX = leftX + boxWidth / 2;
           const rightX = leftX + boxWidth;
 
+          // 1. Circular center handles (9px radius)
           if (yTarget !== null && Math.hypot(x - midX, y - yTarget) <= 9) {
             return { drawing: d, handle: "pos_target" };
           }
@@ -3304,12 +3309,42 @@ export function TradingViewContainer({
           if (Math.hypot(x - midX, y - y1) <= 9) {
             return { drawing: d, handle: "pos_entry" };
           }
+
+          // 2. Full horizontal edge line hit-testing (DEC-100 TradingView parity)
+          if (yTarget !== null && x >= leftX - 4 && x <= rightX + 4 && Math.abs(y - yTarget) <= 6) {
+            return { drawing: d, handle: "pos_target" };
+          }
+          if (yStop !== null && x >= leftX - 4 && x <= rightX + 4 && Math.abs(y - yStop) <= 6) {
+            return { drawing: d, handle: "pos_stop" };
+          }
+          if (x >= leftX - 4 && x <= rightX + 4 && Math.abs(y - y1) <= 5) {
+            return { drawing: d, handle: "pos_entry" };
+          }
+
+          // 3. Body interior dragging
           if (yTarget !== null && yStop !== null) {
             const minY = Math.min(y1, yTarget, yStop);
             const maxY = Math.max(y1, yTarget, yStop);
             if (x >= leftX && x <= rightX && y >= minY && y <= maxY) {
               return { drawing: d, handle: "body" as const };
             }
+          }
+          continue;
+        }
+
+        if (x2 === null || y2 === null) continue;
+
+        // 5. Rectangle 8 handles hit testing (DEC-052, DEC-062)
+        if (d.type === "rectangle") {
+          const handles = getRectangleHandles(x1, y1, x2, y2);
+          for (const h of handles) {
+            if (Math.hypot(x - h.x, y - h.y) <= 9) {
+              return { drawing: d, handle: h.type };
+            }
+          }
+          const canvasW = drawingCanvasRef.current?.getBoundingClientRect().width || 2000;
+          if (isPointNearRectangle(x, y, x1, y1, x2, y2, !!d.extendRight, canvasW, 8)) {
+            return { drawing: d, handle: "body" as const };
           }
           continue;
         }
@@ -3654,6 +3689,132 @@ export function TradingViewContainer({
           );
         }
       });
+    }
+
+    // Render True Market Structure & Substructure (Classic ZigZag, BOS, CHoCH)
+    if (marketStructureResult && !isDrawingsHidden) {
+      const { majorSwings, subSwings, breakouts } = marketStructureResult;
+
+      // 1. Draw Internal Substructure ZigZag
+      if (marketStructureSettings.showSubstructure && subSwings.length > 1) {
+        ctx.strokeStyle = marketStructureSettings.subColor;
+        ctx.lineWidth = marketStructureSettings.subLineWidth;
+        if (marketStructureSettings.subLineStyle === "dashed") ctx.setLineDash([4, 4]);
+        else if (marketStructureSettings.subLineStyle === "dotted") ctx.setLineDash([2, 2]);
+        else ctx.setLineDash([]);
+
+        ctx.beginPath();
+        let started = false;
+        for (let s = 0; s < subSwings.length; s++) {
+          const sx = getSafeScreenX(subSwings[s].time);
+          const sy = getSafeScreenY(subSwings[s].price);
+          if (sx !== null && sy !== null) {
+            if (!started) {
+              ctx.moveTo(sx, sy);
+              started = true;
+            } else {
+              ctx.lineTo(sx, sy);
+            }
+          }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // 2. Draw Major Structure ZigZag & Pivot Labels
+      if (marketStructureSettings.showMajor && majorSwings.length > 0) {
+        ctx.strokeStyle = marketStructureSettings.majorColor;
+        ctx.lineWidth = marketStructureSettings.majorLineWidth;
+        if (marketStructureSettings.majorLineStyle === "dashed") ctx.setLineDash([5, 5]);
+        else if (marketStructureSettings.majorLineStyle === "dotted") ctx.setLineDash([2, 2]);
+        else ctx.setLineDash([]);
+
+        ctx.beginPath();
+        let started = false;
+        for (let m = 0; m < majorSwings.length; m++) {
+          const mx = getSafeScreenX(majorSwings[m].time);
+          const my = getSafeScreenY(majorSwings[m].price);
+          if (mx !== null && my !== null) {
+            if (!started) {
+              ctx.moveTo(mx, my);
+              started = true;
+            } else {
+              ctx.lineTo(mx, my);
+            }
+          }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Swing Points & HH/HL/LH/LL Labels
+        majorSwings.forEach((sw) => {
+          const sx = getSafeScreenX(sw.time);
+          const sy = getSafeScreenY(sw.price);
+          if (sx === null || sy === null) return;
+
+          // Draw small pivot circle
+          ctx.fillStyle = marketStructureSettings.majorColor;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Draw HH / HL / LH / LL label badge if enabled
+          if (marketStructureSettings.showSwingLabels && sw.tag) {
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "center";
+            const textY = sw.type === "HIGH" ? sy - 7 : sy + 14;
+
+            // Background pill
+            const textWidth = ctx.measureText(sw.tag).width;
+            ctx.fillStyle = "rgba(23, 27, 38, 0.85)";
+            ctx.fillRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
+            ctx.strokeStyle = marketStructureSettings.majorColor;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx - textWidth / 2 - 3, textY - 8, textWidth + 6, 12);
+
+            ctx.fillStyle = marketStructureSettings.majorColor;
+            ctx.fillText(sw.tag, sx, textY + 1);
+          }
+        });
+      }
+
+      // 3. Draw Breakouts (BOS & CHoCH)
+      if (breakouts.length > 0) {
+        breakouts.forEach((b) => {
+          const x1 = getSafeScreenX(b.fromTime);
+          const x2 = getSafeScreenX(b.toTime);
+          const y = getSafeScreenY(b.level);
+
+          if (x1 !== null && x2 !== null && y !== null) {
+            const bColor =
+              b.direction === "BULLISH"
+                ? marketStructureSettings.bullishColor
+                : marketStructureSettings.bearishColor;
+
+            // Dashed breakout level ray
+            ctx.strokeStyle = bColor;
+            ctx.lineWidth = b.isSubstructure ? 1 : 1.5;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Label pill in the center of the breakout
+            const midX = (x1 + x2) / 2;
+            const labelText = `${b.type}${b.isSubstructure ? " (sub)" : ""}`;
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "center";
+            const textWidth = ctx.measureText(labelText).width;
+
+            ctx.fillStyle = bColor;
+            ctx.fillRect(midX - textWidth / 2 - 3, y - 7, textWidth + 6, 13);
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(labelText, midX, y + 3);
+          }
+        });
+      }
     }
 
     // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044 & DEC-070)
@@ -4555,7 +4716,6 @@ export function TradingViewContainer({
       if (
         isDrawingMode ||
         draggedHandleRef.current ||
-        selectedDrawingId !== null ||
         drawingStep === 1 ||
         inFlightDrawing !== null ||
         inFlightPathPoints.length > 0 ||
@@ -4913,7 +5073,8 @@ export function TradingViewContainer({
       (barsRef.current.length > 0
         ? barsRef.current[barsRef.current.length - 1].time
         : Date.now());
-    let effectivePrice = coordinateToPrice(y) || currentPrice || 0;
+    const clampedY = Math.max(0, Math.min(rect.height, y));
+    let effectivePrice = coordinateToPrice(y) || coordinateToPrice(clampedY) || currentPrice || 0;
 
     if (isMagnetActive) {
       const snap = findNearestCandlePoint(
@@ -5042,16 +5203,29 @@ export function TradingViewContainer({
           return;
         }
 
-        // 3. Long / Short Position handles (DEC-054, DEC-065)
+        // 3. Long / Short Position handles (DEC-054, DEC-065, DEC-100)
+        const posMinBuffer =
+          pricePrecision?.minMove && pricePrecision.minMove > 0
+            ? pricePrecision.minMove
+            : drawing.startPrice > 0
+            ? drawing.startPrice * 0.0001
+            : 0.000001;
+        const posPrecision = pricePrecision?.precision ?? 4;
+        const posMinMove = pricePrecision?.minMove ?? posMinBuffer;
+
         if (activeHandle === "pos_target") {
           saveDrawings(
             currentDrawings.map((d) => {
               if (d.id !== selectedDrawingId) return d;
               const isLong = d.type === "long_position";
-              const clampedTarget = isLong
-                ? Math.max(d.startPrice + 0.01, effectivePrice)
-                : Math.min(d.startPrice - 0.01, effectivePrice);
-              return { ...d, targetPrice: clampedTarget, endPrice: clampedTarget };
+              const rawClamped = clampPositionTargetPrice(
+                effectivePrice,
+                d.startPrice,
+                isLong,
+                posMinBuffer
+              );
+              const quantized = quantizePrice(rawClamped, posMinMove, posPrecision);
+              return { ...d, targetPrice: quantized, endPrice: quantized };
             })
           );
           return;
@@ -5061,10 +5235,14 @@ export function TradingViewContainer({
             currentDrawings.map((d) => {
               if (d.id !== selectedDrawingId) return d;
               const isLong = d.type === "long_position";
-              const clampedStop = isLong
-                ? Math.min(d.startPrice - 0.01, effectivePrice)
-                : Math.max(d.startPrice + 0.01, effectivePrice);
-              return { ...d, stopPrice: clampedStop };
+              const rawClamped = clampPositionStopPrice(
+                effectivePrice,
+                d.startPrice,
+                isLong,
+                posMinBuffer
+              );
+              const quantized = quantizePrice(rawClamped, posMinMove, posPrecision);
+              return { ...d, stopPrice: quantized };
             })
           );
           return;
@@ -5086,10 +5264,18 @@ export function TradingViewContainer({
                   : isLong
                   ? d.startPrice * 0.98
                   : d.startPrice * 1.02;
-              const clamped = clampPositionEntryPrice(effectivePrice, curTarget, curStop, isLong);
+              const clamped = clampPositionEntryPrice(
+                effectivePrice,
+                curTarget,
+                curStop,
+                isLong,
+                0.01,
+                posMinBuffer
+              );
+              const quantized = quantizePrice(clamped, posMinMove, posPrecision);
               return {
                 ...d,
-                startPrice: clamped,
+                startPrice: quantized,
                 targetPrice: curTarget,
                 stopPrice: curStop,
               };
@@ -5295,7 +5481,8 @@ export function TradingViewContainer({
       (barsRef.current.length > 0
         ? barsRef.current[barsRef.current.length - 1].time
         : Date.now());
-    let effectivePrice = coordinateToPrice(y) || currentPrice || 0;
+    const clampedY = Math.max(0, Math.min(rect.height, y));
+    let effectivePrice = coordinateToPrice(y) || coordinateToPrice(clampedY) || currentPrice || 0;
 
     if (isMagnetActive) {
       const snap = findNearestCandlePoint(
@@ -5512,6 +5699,19 @@ export function TradingViewContainer({
     return computeUnmitigatedFvgs(bars, { timeframe: resolution });
   }, [hasFvgIndicator, bars, resolution]);
 
+  const isMarketStructureHidden =
+    hiddenIndicators.includes("True Market Structure & Substructure") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("structure"));
+  const hasMarketStructure =
+    (activeIndicators.includes("True Market Structure & Substructure") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("structure"))) &&
+    !isMarketStructureHidden;
+
+  const marketStructureResult = useMemo(() => {
+    if (!hasMarketStructure || bars.length === 0) return null;
+    return computeMarketStructure(bars, marketStructureSettings);
+  }, [hasMarketStructure, bars, marketStructureSettings]);
+
   const bullFvgCount = activeFvgZones.filter((z) => z.type === "BULLISH").length;
   const bearFvgCount = activeFvgZones.filter((z) => z.type === "BEARISH").length;
 
@@ -5581,7 +5781,32 @@ export function TradingViewContainer({
         const validX1 = x1 !== null ? x1 : width / 2;
         const validX2 = x2 !== null ? x2 : width / 2;
         const validY2 = y2 !== null ? y2 : y1;
-        const top = Math.max(40, Math.min(y1, validY2) - 40);
+        let top = Math.max(40, Math.min(y1, validY2) - 40);
+
+        // For position tools, ensure toolbar is positioned above the topmost boundary line (DEC-100)
+        if (selectedDrawing.type === "long_position" || selectedDrawing.type === "short_position") {
+          const isLong = selectedDrawing.type === "long_position";
+          const tp =
+            selectedDrawing.targetPrice !== undefined
+              ? selectedDrawing.targetPrice
+              : isLong
+              ? selectedDrawing.startPrice * 1.04
+              : selectedDrawing.startPrice * 0.96;
+          const sl =
+            selectedDrawing.stopPrice !== undefined
+              ? selectedDrawing.stopPrice
+              : isLong
+              ? selectedDrawing.startPrice * 0.98
+              : selectedDrawing.startPrice * 1.02;
+          const ytp = getSafeScreenY(tp);
+          const ysl = getSafeScreenY(sl);
+          const candidates = [y1];
+          if (ytp !== null) candidates.push(ytp);
+          if (ysl !== null) candidates.push(ysl);
+          const highestY = Math.min(...candidates);
+          top = Math.max(36, highestY - 42);
+        }
+
         const left = Math.max(12, Math.min(width - 180, (validX1 + validX2) / 2 - 80));
         floatingToolbarPos = { x: left, y: top };
       }
@@ -5768,6 +5993,46 @@ export function TradingViewContainer({
                 <span className="text-[#00c087] font-bold">{bullFvgCount} Bull</span>
                 <span>·</span>
                 <span className="text-[#ff3b30] font-bold">{bearFvgCount} Bear</span>
+              </div>
+            )}
+
+            {hasMarketStructure && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container border border-outline-variant/30 text-[10px] font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#2962ff] animate-pulse" />
+                <span className="font-semibold text-on-surface">
+                  Structure ({marketStructureSettings.majorLength}, {marketStructureSettings.subLength})
+                </span>
+                {marketStructureResult && (
+                  <span className="text-muted text-[9px]">
+                    ({marketStructureResult.majorSwings.length}S · {marketStructureResult.breakouts.length}B)
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onToggleIndicatorVisibility?.("True Market Structure & Substructure")}
+                  title={isMarketStructureHidden ? "Show Structure" : "Hide Structure"}
+                  className="text-muted hover:text-on-surface p-0.5 cursor-pointer ml-0.5"
+                >
+                  {isMarketStructureHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsMarketStructureModalOpen(true)}
+                  title="Structure Settings"
+                  className="text-muted hover:text-on-surface p-0.5 cursor-pointer"
+                >
+                  <Settings size={11} />
+                </button>
+                {onToggleIndicator && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleIndicator("True Market Structure & Substructure")}
+                    title="Remove Structure from chart"
+                    className="text-muted hover:text-error p-0.5 cursor-pointer"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -6085,6 +6350,17 @@ export function TradingViewContainer({
                 saveDrawings(drawingsRef.current.filter((d) => d.id !== id));
                 setSelectedDrawingId(null);
                 setIsSettingsModalOpen(false);
+              }}
+            />
+
+            {/* TradingView Market Structure Settings Modal */}
+            <MarketStructureSettingsModal
+              isOpen={isMarketStructureModalOpen}
+              onClose={() => setIsMarketStructureModalOpen(false)}
+              settings={marketStructureSettings}
+              onSaveSettings={(newSettings) => {
+                saveMarketStructureSettings(newSettings);
+                setMarketStructureSettings(newSettings);
               }}
             />
 

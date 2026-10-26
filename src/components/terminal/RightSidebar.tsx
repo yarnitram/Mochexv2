@@ -1687,6 +1687,15 @@ export function RightSidebar({
                           </span>
                         </div>
                         <div className="flex items-center gap-0.5 shrink-0">
+                          {indName.toLowerCase().includes("structure") && (
+                            <button
+                              onClick={() => window.dispatchEvent(new CustomEvent("mochex:open-market-structure-settings"))}
+                              title="Structure Settings"
+                              className="p-1 rounded text-muted hover:text-on-surface hover:bg-surface cursor-pointer transition-colors"
+                            >
+                              <Settings2 size={11} />
+                            </button>
+                          )}
                           {onToggleIndicatorVisibility && (
                             <button
                               onClick={() => onToggleIndicatorVisibility(indName)}

@@ -6,6 +6,9 @@ import {
   calculatePositionMetrics,
   getPositionHandles,
   clampPositionEntryPrice,
+  clampPositionTargetPrice,
+  clampPositionStopPrice,
+  quantizePrice,
   calculateDateRangeMetrics,
   calculateRulerMetrics,
   getRectangleHandles,
@@ -451,6 +454,58 @@ describe("Geometric Drawing Math Engine (DEC-040 to DEC-055)", () => {
     const customLvl = calculated.find((l) => l.ratio === 0.65);
     expect(customLvl).toBeDefined();
     expect(customLvl?.price).toBe(135);
+  });
+
+  it("should clamp position target and stop prices with dynamic tick-aware buffer (DEC-100)", () => {
+    // 1. High-value asset (BTC, tick minMove = 0.01)
+    const btcEntry = 68000;
+    // Long target dragging down towards entry: clamps to entry + minBuffer
+    expect(clampPositionTargetPrice(68000.005, btcEntry, true, 0.01)).toBeCloseTo(68000.01, 2);
+    // Long target dragging above entry: freely allows higher target
+    expect(clampPositionTargetPrice(69500, btcEntry, true, 0.01)).toBe(69500);
+
+    // Long stop dragging up towards entry: clamps to entry - minBuffer
+    expect(clampPositionStopPrice(67999.995, btcEntry, true, 0.01)).toBeCloseTo(67999.99, 2);
+    // Long stop dragging below entry: freely allows lower stop
+    expect(clampPositionStopPrice(66500, btcEntry, true, 0.01)).toBe(66500);
+
+    // Short target dragging up towards entry: clamps to entry - minBuffer
+    expect(clampPositionTargetPrice(68000.005, btcEntry, false, 0.01)).toBeCloseTo(67999.99, 2);
+    // Short stop dragging down towards entry: clamps to entry + minBuffer
+    expect(clampPositionStopPrice(67999.995, btcEntry, false, 0.01)).toBeCloseTo(68000.01, 2);
+
+    // 2. Micro-cent / sub-dollar asset (PEPE, entry = 0.0000095, tick minMove = 0.0000001)
+    const pepeEntry = 0.0000095;
+    const pepeMinBuffer = 0.0000001;
+
+    // Long target dragging down towards entry clamps to 0.0000096, NOT locking up with 0.01
+    expect(clampPositionTargetPrice(0.00000951, pepeEntry, true, pepeMinBuffer)).toBeCloseTo(0.0000096, 7);
+    // Long stop dragging up towards entry clamps to 0.0000094, NOT going negative
+    expect(clampPositionStopPrice(0.00000949, pepeEntry, true, pepeMinBuffer)).toBeCloseTo(0.0000094, 7);
+  });
+
+  it("should snap position prices to dynamic tick size and precision (DEC-100)", () => {
+    // BTC: minMove 0.01, precision 2
+    expect(quantizePrice(68123.4567, 0.01, 2)).toBe(68123.46);
+    expect(quantizePrice(68123.451, 0.01, 2)).toBe(68123.45);
+
+    // Mid asset (XRP/ADA): minMove 0.0001, precision 4
+    expect(quantizePrice(0.54326, 0.0001, 4)).toBe(0.5433);
+
+    // Micro asset (PEPE): minMove 0.0000001, precision 7
+    expect(quantizePrice(0.00000956, 0.0000001, 7)).toBe(0.0000096);
+  });
+
+  it("should support explicitMinBuffer in clampPositionEntryPrice (DEC-100)", () => {
+    const pepeEntry = 0.0000095;
+    const target = 0.0000115;
+    const stop = 0.0000085;
+    const minBuffer = 0.0000001;
+
+    // Drag entry above target: clamped to target - minBuffer
+    expect(clampPositionEntryPrice(0.000012, target, stop, true, 0.01, minBuffer)).toBeCloseTo(0.0000114, 7);
+    // Drag entry below stop: clamped to stop + minBuffer
+    expect(clampPositionEntryPrice(0.000008, target, stop, true, 0.01, minBuffer)).toBeCloseTo(0.0000086, 7);
   });
 });
 
