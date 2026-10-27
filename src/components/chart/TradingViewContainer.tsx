@@ -28,6 +28,13 @@ import {
 } from "@/lib/indicators/market-structure";
 import { MarketStructureSettingsModal } from "./MarketStructureSettingsModal";
 import {
+  computeCandleMarketStructure,
+  CandleStructureSettings,
+  getStoredCandleStructureSettings,
+  saveCandleStructureSettings,
+} from "@/lib/indicators/candle-structure";
+import { CandleStructureSettingsModal } from "./CandleStructureSettingsModal";
+import {
   ChartDrawing,
   calculateFibLevels,
   calculateTrendFibLevels,
@@ -330,6 +337,16 @@ export function TradingViewContainer({
     const handleOpenSettings = () => setIsMarketStructureModalOpen(true);
     window.addEventListener("mochex:open-market-structure-settings", handleOpenSettings);
     return () => window.removeEventListener("mochex:open-market-structure-settings", handleOpenSettings);
+  }, []);
+
+  // Candlestick-Based Market Structure Settings State
+  const [candleStructureSettings, setCandleStructureSettings] = useState<CandleStructureSettings>(() => getStoredCandleStructureSettings());
+  const [isCandleStructureModalOpen, setIsCandleStructureModalOpen] = useState(false);
+
+  useEffect(() => {
+    const handleOpenCandleSettings = () => setIsCandleStructureModalOpen(true);
+    window.addEventListener("mochex:open-candle-structure-settings", handleOpenCandleSettings);
+    return () => window.removeEventListener("mochex:open-candle-structure-settings", handleOpenCandleSettings);
   }, []);
 
   // Undo / Redo History Engine Refs (DEC-068)
@@ -3838,6 +3855,98 @@ export function TradingViewContainer({
       }
     }
 
+    // Render Candlestick-Based Market Structure (Price Action SH/SL & MSS/BOS)
+    if (candleStructureResult && !isDrawingsHidden) {
+      const { swings, breaks } = candleStructureResult;
+
+      // 1. Render Swing High & Swing Low markers
+      if (candleStructureSettings.showSwings) {
+        swings.forEach((sw) => {
+          const sx = getSafeScreenX(sw.time);
+          const sy = getSafeScreenY(sw.price);
+          if (sx === null || sy === null) return;
+
+          const color =
+            sw.type === "HIGH"
+              ? candleStructureSettings.swingHighColor
+              : candleStructureSettings.swingLowColor;
+
+          // Draw small triangle pivot marker
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          if (sw.type === "HIGH") {
+            ctx.moveTo(sx, sy - 2);
+            ctx.lineTo(sx - 4, sy - 7);
+            ctx.lineTo(sx + 4, sy - 7);
+          } else {
+            ctx.moveTo(sx, sy + 2);
+            ctx.lineTo(sx - 4, sy + 7);
+            ctx.lineTo(sx + 4, sy + 7);
+          }
+          ctx.closePath();
+          ctx.fill();
+
+          // Label text badge
+          if (candleStructureSettings.showSwingTags) {
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "center";
+            const textY = sw.type === "HIGH" ? sy - 9 : sy + 16;
+
+            const textWidth = ctx.measureText(sw.tag).width;
+            ctx.fillStyle = "rgba(19, 23, 34, 0.85)";
+            ctx.fillRect(sx - textWidth / 2 - 2, textY - 8, textWidth + 4, 11);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx - textWidth / 2 - 2, textY - 8, textWidth + 4, 11);
+
+            ctx.fillStyle = color;
+            ctx.fillText(sw.tag, sx, textY);
+          }
+        });
+      }
+
+      // 2. Render Market Structure Shifts (MSS / BOS)
+      if (candleStructureSettings.showBreaks) {
+        breaks.forEach((b) => {
+          const x1 = getSafeScreenX(b.fromTime);
+          const x2 = getSafeScreenX(b.toTime);
+          const y = getSafeScreenY(b.level);
+
+          if (x1 !== null && x2 !== null && y !== null) {
+            const bColor =
+              b.direction === "BULLISH"
+                ? candleStructureSettings.bullishMssColor
+                : candleStructureSettings.bearishMssColor;
+
+            // Breakout level ray
+            ctx.strokeStyle = bColor;
+            ctx.lineWidth = candleStructureSettings.breakLineWidth;
+            if (candleStructureSettings.breakLineStyle === "dashed") ctx.setLineDash([3, 3]);
+            else if (candleStructureSettings.breakLineStyle === "dotted") ctx.setLineDash([2, 2]);
+            else ctx.setLineDash([]);
+
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Shift pill
+            const midX = (x1 + x2) / 2;
+            const labelText = `${b.direction === "BULLISH" ? "+" : "-"}${b.type}`;
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "center";
+            const textWidth = ctx.measureText(labelText).width;
+
+            ctx.fillStyle = bColor;
+            ctx.fillRect(midX - textWidth / 2 - 3, y - 6, textWidth + 6, 12);
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(labelText, midX, y + 3);
+          }
+        });
+      }
+    }
+
     // 1. Render all persistent drawings if not hidden (DEC-040 & DEC-044 & DEC-070)
     if (!isDrawingsHidden) {
       drawings.forEach((d) => {
@@ -5733,6 +5842,19 @@ export function TradingViewContainer({
     return computeMarketStructure(bars, marketStructureSettings);
   }, [hasMarketStructure, bars, marketStructureSettings]);
 
+  const isCandleStructureHidden =
+    hiddenIndicators.includes("Candlestick Market Structure (Price Action)") ||
+    hiddenIndicators.some((ind) => ind.toLowerCase().includes("candle"));
+  const hasCandleStructure =
+    (activeIndicators.includes("Candlestick Market Structure (Price Action)") ||
+      activeIndicators.some((ind) => ind.toLowerCase().includes("candle"))) &&
+    !isCandleStructureHidden;
+
+  const candleStructureResult = useMemo(() => {
+    if (!hasCandleStructure || bars.length === 0) return null;
+    return computeCandleMarketStructure(bars, candleStructureSettings);
+  }, [hasCandleStructure, bars, candleStructureSettings]);
+
   const bullFvgCount = activeFvgZones.filter((z) => z.type === "BULLISH").length;
   const bearFvgCount = activeFvgZones.filter((z) => z.type === "BEARISH").length;
 
@@ -6104,6 +6226,46 @@ export function TradingViewContainer({
                 )}
               </div>
             )}
+
+            {hasCandleStructure && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container border border-outline-variant/30 text-[10px] font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00c087] animate-pulse" />
+                <span className="font-semibold text-on-surface">
+                  Candle Structure ({candleStructureSettings.flankBars === 1 ? "3-Bar" : `${candleStructureSettings.flankBars * 2 + 1}-Bar`})
+                </span>
+                {candleStructureResult && (
+                  <span className="text-muted text-[9px]">
+                    ({candleStructureResult.swings.length}S · {candleStructureResult.breaks.length} Breaks)
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onToggleIndicatorVisibility?.("Candlestick Market Structure (Price Action)")}
+                  title={isCandleStructureHidden ? "Show Candle Structure" : "Hide Candle Structure"}
+                  className="text-muted hover:text-on-surface p-0.5 cursor-pointer ml-0.5"
+                >
+                  {isCandleStructureHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCandleStructureModalOpen(true)}
+                  title="Candle Structure Settings"
+                  className="text-muted hover:text-on-surface p-0.5 cursor-pointer"
+                >
+                  <Settings size={11} />
+                </button>
+                {onToggleIndicator && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleIndicator("Candlestick Market Structure (Price Action)")}
+                    title="Remove Candle Structure from chart"
+                    className="text-muted hover:text-error p-0.5 cursor-pointer"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -6430,6 +6592,17 @@ export function TradingViewContainer({
               onSaveSettings={(newSettings) => {
                 saveMarketStructureSettings(newSettings);
                 setMarketStructureSettings(newSettings);
+              }}
+            />
+
+            {/* Candlestick Market Structure Settings Modal */}
+            <CandleStructureSettingsModal
+              isOpen={isCandleStructureModalOpen}
+              onClose={() => setIsCandleStructureModalOpen(false)}
+              settings={candleStructureSettings}
+              onSaveSettings={(newSettings) => {
+                saveCandleStructureSettings(newSettings);
+                setCandleStructureSettings(newSettings);
               }}
             />
 

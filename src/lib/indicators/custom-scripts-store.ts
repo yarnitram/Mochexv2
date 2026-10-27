@@ -298,6 +298,29 @@ function calculate(bars, inputs, ta, strategy, alertcondition) {
   }));
 }`;
 
+export const DEFAULT_CANDLE_STRUCTURE_SCRIPT = `/**
+ * Mochex Custom Indicator: Candlestick Market Structure (Price Action)
+ * Detects 3-bar / 5-bar Candlestick Swings (SH/SL) and Market Structure Shifts (MSS/BOS).
+ */
+function calculate(bars, inputs, ta, strategy, alertcondition) {
+  const flank = inputs.flankBars || 1;
+  const confirmation = inputs.breakoutConfirmation || "close";
+
+  const swings = [];
+  for (let i = flank; i < bars.length - flank; i++) {
+    const cur = bars[i];
+    let isH = true, isL = true;
+    for (let k = 1; k <= flank; k++) {
+      if (bars[i - k].high >= cur.high || bars[i + k].high > cur.high) isH = false;
+      if (bars[i - k].low <= cur.low || bars[i + k].low < cur.low) isL = false;
+    }
+    if (isH) swings.push({ time: cur.time, value: cur.high, type: "HIGH" });
+    if (isL) swings.push({ time: cur.time, value: cur.low, type: "LOW" });
+  }
+
+  return swings.sort((a, b) => a.time - b.time).map(s => ({ time: s.time, value: s.value }));
+}`;
+
 export const DEFAULT_PHANTOM_SMC_SCRIPT = `/**
  * Mochex Custom Indicator: Phantom SMC (Smart Money Concepts)
  * High-probability institutional Supply & Demand zones anchored to the exact base candle,
@@ -3145,6 +3168,9 @@ export function resolveCatalogScriptCode(id?: string, name?: string): string {
   }
   if (n.includes("fvg") || n.includes("fair value")) {
     return DEFAULT_FVG_SCRIPT;
+  }
+  if (n.includes("candle") || n.includes("candlestick") || n.includes("mss")) {
+    return DEFAULT_CANDLE_STRUCTURE_SCRIPT;
   }
   if (n.includes("structure") || n.includes("zigzag")) {
     return DEFAULT_MARKET_STRUCTURE_SCRIPT;
